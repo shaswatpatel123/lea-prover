@@ -1,4 +1,4 @@
-"""Lea's five tools — the minimum surface area for Lean formalization."""
+"""Lea's six tools — the minimum surface area for Lean formalization."""
 
 import os
 import subprocess
@@ -51,6 +51,22 @@ TOOLS_SCHEMA = [
                 "path": {"type": "string", "description": "Path to the .lean file to check."}
             },
             "required": ["path"],
+        },
+    },
+    {
+        "name": "bash",
+        "description": "Run a shell command and return stdout + stderr. Use for lake build, grep, exact?, or any other shell operation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute."},
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (default 120).",
+                    "default": 120,
+                },
+            },
+            "required": ["command"],
         },
     },
     {
@@ -139,6 +155,21 @@ def lean_check(path: str) -> str:
         return "Error: `lean` or `lake` not found. Is Lean 4 installed?"
 
 
+def bash(command: str, timeout: int = 120) -> str:
+    try:
+        result = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=timeout
+        )
+        output = (result.stdout + result.stderr).strip()
+        if not output:
+            return f"(no output, exit code {result.returncode})"
+        if len(output) > 10000:
+            output = output[:10000] + "\n... (truncated)"
+        return output
+    except subprocess.TimeoutExpired:
+        return f"Error: command timed out after {timeout}s."
+
+
 WORKSPACE = Path(__file__).resolve().parent.parent / "workspace"
 
 
@@ -194,6 +225,7 @@ def search_mathlib(query: str, max_results: int = 10) -> str:
 
 # Dispatch table
 TOOL_HANDLERS = {
+    "bash": lambda args: bash(args["command"], args.get("timeout", 120)),
     "read_file": lambda args: read_file(args["path"]),
     "write_file": lambda args: write_file(args["path"], args["content"]),
     "edit_file": lambda args: edit_file(args["path"], args["old_string"], args["new_string"]),

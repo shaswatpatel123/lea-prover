@@ -4,7 +4,19 @@ from pathlib import Path
 
 WORKSPACE = Path(__file__).resolve().parent.parent / "workspace" / "proofs"
 
-SYSTEM_PROMPT = f"""\
+
+def load_system_prompt() -> str:
+    """Build the system prompt, appending lea.md if present."""
+    prompt = BASE_PROMPT
+    # Look for lea.md in cwd, then workspace root
+    for candidate in [Path.cwd() / "lea.md", WORKSPACE.parent / "lea.md"]:
+        if candidate.exists():
+            prompt += "\n\n## Project-Specific Instructions\n" + candidate.read_text()
+            break
+    return prompt
+
+
+BASE_PROMPT = f"""\
 You are Lea, a Lean 4 formalization agent. Your job is to translate natural-language \
 math statements into Lean 4 proofs that compile with zero errors and zero `sorry`s.
 

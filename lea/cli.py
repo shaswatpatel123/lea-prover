@@ -3,7 +3,7 @@
 import argparse
 import sys
 
-from .agent import run, DEFAULT_MODEL, MAX_TURNS
+from .agent import run, list_sessions, DEFAULT_MODEL
 
 
 def main():
@@ -19,22 +19,43 @@ def main():
         "-m", "--model", default=DEFAULT_MODEL, help=f"Model to use (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
-        "--max-turns", type=int, default=MAX_TURNS, help=f"Max agent turns (default: {MAX_TURNS})",
+        "-p", "--provider", default=None, help="Provider: gemini, anthropic, openai (auto-detected from model name if omitted)",
     )
     parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Print each turn's tool calls and results.",
+        "--max-turns", type=int, default=None, help="Max agent turns (default: unlimited)",
+    )
+    parser.add_argument(
+        "--resume", nargs="?", const=True, default=False,
+        help="Resume a session. Pass a session ID, or omit to resume the most recent.",
+    )
+    parser.add_argument(
+        "--sessions", action="store_true", help="List recent sessions and exit.",
     )
 
     args = parser.parse_args()
 
+    if args.sessions:
+        sessions = list_sessions()
+        if not sessions:
+            print("No sessions found.")
+        for s in sessions:
+            print(f"  {s['id']}  {s['model']:30s}  {s['turns']:>3} turns  {s['task']}")
+        return
+
     task = args.task
-    if not task:
+    if not task and not args.resume:
         if sys.stdin.isatty():
             parser.print_help()
             sys.exit(1)
         task = sys.stdin.read().strip()
 
-    result = run(task, model=args.model, max_turns=args.max_turns, verbose=args.verbose)
+    result = run(
+        task=task or "",
+        model=args.model,
+        max_turns=args.max_turns,
+        provider=args.provider,
+        resume=args.resume,
+    )
     print(result)
 
 
