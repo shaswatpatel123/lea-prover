@@ -1,10 +1,10 @@
-"""Evaluate Lea on the miniF2F benchmark.
+"""Evaluate Lea on the FormalQualBench benchmark.
 
 Usage:
-    python -m eval.run_minif2f                          # run validation split
-    python -m eval.run_minif2f --split test              # run test split
-    python -m eval.run_minif2f --split valid --limit 10  # first 10 problems
-    python -m eval.run_minif2f --resume results.json     # resume a partial run
+    python -m eval.run_fqb                              # run all 23 problems
+    python -m eval.run_fqb --limit 5                    # first 5 problems
+    python -m eval.run_fqb --problems GreenTaoTheorem   # specific problem(s)
+    python -m eval.run_fqb --resume results.json        # resume a partial run
 """
 
 import argparse
@@ -21,40 +21,46 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MINIF2F_DIR = REPO_ROOT / "miniF2F-lean4"
-PROOFS_DIR = MINIF2F_DIR / "MiniF2F"
+FQB_DIR = REPO_ROOT / "FormalQualBench"
+PROBLEMS_DIR = FQB_DIR / "FormalQualBench"
 RESULTS_DIR = REPO_ROOT / "eval" / "results"
 
 
-def discover_problems(split: str) -> list[Path]:
-    """Return sorted list of .lean problem files for a split."""
-    split_dir = PROOFS_DIR / {"valid": "Valid", "test": "Test"}[split]
-    if not split_dir.exists():
-        sys.exit(f"Error: {split_dir} not found. Clone miniF2F-lean4 first.")
-    return sorted(split_dir.glob("*.lean"))
+def discover_problems(names: list[str] | None = None) -> list[Path]:
+    """Return sorted list of problem directories."""
+    if not PROBLEMS_DIR.exists():
+        sys.exit(f"Error: {PROBLEMS_DIR} not found. Clone FormalQualBench first.")
+
+    all_dirs = sorted([
+        d for d in PROBLEMS_DIR.iterdir()
+        if d.is_dir() and (d / "Main.lean").exists()
+    ])
+
+    if names:
+        selected = []
+        for name in names:
+            match = [d for d in all_dirs if d.name == name]
+            if not match:
+                sys.exit(f"Error: problem '{name}' not found. Available: {[d.name for d in all_dirs]}")
+            selected.extend(match)
+        return selected
+
+    return all_dirs
 
 
-def extract_theorem(path: Path) -> tuple[str, str]:
-    """Extract the theorem name and full statement (without sorry) from a problem file."""
-    text = path.read_text()
-
-    # Extract theorem name
-    match = re.search(r"theorem\s+(\w+)", text)
-    name = match.group(1) if match else path.stem
-
-    # Extract just the theorem statement (everything from 'theorem' to 'sorry')
-    # We give the agent the full file context (imports, opens) plus the theorem
-    statement = text.replace(":= by sorry", "").replace(":= sorry", "").strip()
-
+def read_problem(problem_dir: Path) -> tuple[str, str]:
+    """Read a problem's Main.lean and return (name, full statement without sorry)."""
+    name = problem_dir.name
+    text = (problem_dir / "Main.lean").read_text()
+    statement = text.replace(":= by\n  sorry", "").replace(":= by sorry", "").strip()
     return name, statement
 
 
 def verify_proof(proof_path: Path) -> tuple[bool, str]:
-    """Compile a proof file against the miniF2F Lake project. Returns (success, output)."""
+    """Compile a proof file against the FormalQualBench Lake project."""
     if not proof_path.exists():
         return False, "Proof file not found"
 
-    # Check for disallowed constructs in the source
     content = proof_path.read_text()
     if "sorry" in content:
         return False, "Proof contains sorry"
@@ -65,36 +71,40 @@ def verify_proof(proof_path: Path) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             ["lake", "env", "lean", str(proof_path)],
-            capture_output=True, text=True, timeout=300,
-            cwd=str(MINIF2F_DIR),
+            capture_output=True, text=True, timeout=600,
+            cwd=str(FQB_DIR),
         )
         output = (result.stdout + "\n" + result.stderr).strip()
         if result.returncode != 0:
             return False, output if output else f"Exit code {result.returncode}"
+        # Check for sorry in compiler output (apply?/exact? leave sorry behind)
         if "declaration uses `sorry`" in output or "uses 'sorry'" in output:
             return False, "Proof uses sorry (via tactic query)"
         if "error" in output.lower():
             return False, output
         return True, output if output else "OK"
     except subprocess.TimeoutExpired:
-        return False, "Compilation timed out (300s)"
+        return False, "Compilation timed out (600s)"
 
 
-def run_agent(theorem_name: str, statement: str, model: str, max_turns: int,
+def run_agent(problem_name: str, statement: str, model: str, max_turns: int | None,
               proof_dir: Path, transcript_dir: Path) -> dict:
-    """Run Lea on a single problem. Returns result dict."""
+    """Run Lea on a single FQB problem."""
     from lea.agent import run
 
     proof_dir.mkdir(parents=True, exist_ok=True)
     transcript_dir.mkdir(parents=True, exist_ok=True)
-    proof_path = proof_dir / f"{theorem_name}.lean"
+    proof_path = proof_dir / f"{problem_name}.lean"
 
     task = (
         f"Prove the following Lean 4 theorem. Write the complete proof "
-        f"(including all imports and opens) to: {proof_path}\n\n"
+        f"(including all imports, namespace, and the theorem) to: {proof_path}\n\n"
         f"```lean\n{statement}\n```\n\n"
-        f"The file must compile with `lake env lean` in the miniF2F-lean4 project "
-        f"with zero errors and no `sorry`."
+        f"The file must compile with `lake env lean` in the FormalQualBench project "
+        f"with zero errors, no `sorry`, and no custom `axiom` declarations.\n\n"
+        f"This is a research-level theorem. If you need intermediate lemmas, define them "
+        f"in the same file within the namespace. Use `exact?`, `apply?`, and `search_mathlib` "
+        f"to find relevant Mathlib lemmas. Think carefully about the proof strategy before writing code."
     )
 
     started_at = datetime.now(timezone.utc).isoformat()
@@ -112,14 +122,14 @@ def run_agent(theorem_name: str, statement: str, model: str, max_turns: int,
     # Verify
     success, verify_output = verify_proof(proof_path)
 
-    # Save per-problem transcript
+    # Save transcript
     transcript_data = {
-        "theorem": theorem_name,
+        "problem": problem_name,
         "started_at": started_at,
         "finished_at": finished_at,
         "time_s": round(elapsed, 1),
         "success": success,
-        "verify_output": verify_output[:500],
+        "verify_output": verify_output[:1000],
     }
     if transcript:
         transcript_data["turns"] = transcript["turns"]
@@ -128,11 +138,11 @@ def run_agent(theorem_name: str, statement: str, model: str, max_turns: int,
     else:
         transcript_data["agent_output"] = agent_output[:2000] if isinstance(agent_output, str) else ""
 
-    transcript_path = transcript_dir / f"{theorem_name}.json"
+    transcript_path = transcript_dir / f"{problem_name}.json"
     transcript_path.write_text(json.dumps(transcript_data, indent=2))
 
     return {
-        "theorem": theorem_name,
+        "problem": problem_name,
         "success": success,
         "time_s": round(elapsed, 1),
         "turns": transcript["turns"] if transcript else 0,
@@ -143,63 +153,57 @@ def run_agent(theorem_name: str, statement: str, model: str, max_turns: int,
 
 
 def load_results(path: Path) -> dict:
-    """Load existing results for resuming."""
     if path.exists():
         return json.loads(path.read_text())
     return {}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate Lea on miniF2F")
-    parser.add_argument("--split", default="valid", choices=["valid", "test"])
+    parser = argparse.ArgumentParser(description="Evaluate Lea on FormalQualBench")
     parser.add_argument("--model", default="gemini-3.1-pro-preview")
-    parser.add_argument("--max-turns", type=int, default=30)
-    parser.add_argument("--limit", type=int, default=None, help="Max problems to attempt")
-    parser.add_argument("--resume", type=str, default=None, help="Resume from a results JSON file")
-    parser.add_argument("--timeout", type=int, default=600, help="Per-problem timeout in seconds")
+    parser.add_argument("--max-turns", type=int, default=None, help="Max turns per problem (default: unlimited)")
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--problems", nargs="+", default=None, help="Specific problem names to run")
+    parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
 
-    problems = discover_problems(args.split)
+    problems = discover_problems(args.problems)
     if args.limit:
         problems = problems[:args.limit]
 
-    # Set up results and transcript directories
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    run_name = f"{args.split}_{timestamp}"
+    run_name = f"fqb_{timestamp}"
     results_path = Path(args.resume) if args.resume else RESULTS_DIR / f"{run_name}.json"
     transcript_dir = RESULTS_DIR / f"{run_name}_transcripts"
 
-    # Load existing results for resuming
     existing = load_results(results_path) if args.resume else {}
     completed = set(existing.get("completed", {}).keys())
     if args.resume:
-        # Derive transcript dir from existing results file name
         transcript_dir = results_path.parent / f"{results_path.stem}_transcripts"
 
-    # Proof scratch directory
-    proof_dir = MINIF2F_DIR / "eval_proofs"
+    proof_dir = FQB_DIR / "eval_proofs"
 
     results = existing.get("completed", {})
     passed = sum(1 for r in results.values() if r["success"])
     total = len(results)
 
-    print(f"miniF2F eval: {args.split} split, {len(problems)} problems, model={args.model}")
+    print(f"FormalQualBench eval: {len(problems)} problems, model={args.model}, max_turns={args.max_turns}")
     print(f"Transcripts: {transcript_dir}")
     if completed:
         print(f"Resuming: {len(completed)} already done ({passed}/{total} passed)")
     print()
 
-    for i, problem_path in enumerate(problems):
-        name = problem_path.stem
+    for problem_dir in problems:
+        name = problem_dir.name
         if name in completed:
             continue
 
-        theorem_name, statement = extract_theorem(problem_path)
+        problem_name, statement = read_problem(problem_dir)
 
         print(f"[{total + 1}/{len(problems)}] {name}", flush=True)
 
-        result = run_agent(theorem_name, statement, args.model, args.max_turns,
+        result = run_agent(problem_name, statement, args.model, args.max_turns,
                            proof_dir, transcript_dir)
         results[name] = result
         total += 1
@@ -212,9 +216,8 @@ def main():
 
         print(f"  Running: {passed}/{total} ({100*passed/total:.1f}%)\n", flush=True)
 
-        # Save after each problem (crash-safe)
         output = {
-            "split": args.split,
+            "benchmark": "FormalQualBench",
             "model": args.model,
             "max_turns": args.max_turns,
             "passed": passed,
@@ -224,9 +227,8 @@ def main():
         }
         results_path.write_text(json.dumps(output, indent=2))
 
-    # Final summary
     print(f"\n{'='*50}")
-    print(f"miniF2F {args.split}: {passed}/{total} ({100*passed/total:.1f}%)")
+    print(f"FormalQualBench: {passed}/{total} ({100*passed/total:.1f}%)")
     print(f"Results: {results_path}")
     print(f"Transcripts: {transcript_dir}")
 

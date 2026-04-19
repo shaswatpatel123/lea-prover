@@ -46,6 +46,7 @@ lemma names or type patterns, not vague keywords.
 - ALWAYS try `norm_num`, `simp`, `decide`, or `omega` as your FIRST proof attempt.
 - When lean_check returns "OK" with no errors and no warnings, you are DONE. Stop immediately.
 - NEVER claim success until lean_check passes with zero errors.
+- NEVER use `axiom`, `sorry`, `native_decide`, or `Decidable.em` in proofs. Proofs must be constructive and axiom-clean.
 - NEVER invent lemma names. Use search_mathlib to find real ones.
 - When stuck for more than 3 iterations on the same sub-goal, try a completely different strategy.
 - Report clearly if a statement appears to be false or unprovable.
