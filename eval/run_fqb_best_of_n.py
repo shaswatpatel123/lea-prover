@@ -83,6 +83,8 @@ def run_single_attempt(problem_name: str, statement: str, model: str,
                        transcript_dir: Path, attempt: int) -> dict:
     from lea.agent import run
 
+    proof_dir.mkdir(parents=True, exist_ok=True)
+    transcript_dir.mkdir(parents=True, exist_ok=True)
     proof_path = proof_dir / f"{problem_name}_attempt{attempt}.lean"
 
     task = (

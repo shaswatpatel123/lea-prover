@@ -18,6 +18,11 @@ workspace/proofs/*
 eval/results/
 eval/*.log
 
+# Agent scratch files in repo root
+/test*.lean
+/test*.py
+/search_*.py
+
 # OS
 .DS_Store
 
