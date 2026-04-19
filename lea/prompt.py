@@ -75,6 +75,14 @@ The output will suggest the exact tactic to use. Prefer this over grepping Mathl
 - NEVER invent lemma names. Use `exact?`/`apply?` or `search_mathlib` to find real ones.
 - If you've failed 3+ times on the same sub-goal with the same approach, try a completely different strategy. Do not keep editing the same broken proof.
 - Report clearly if a statement appears to be false or unprovable.
+
+## Search budget (IMPORTANT)
+You have a HARD budget of 10 total Mathlib searches (grep, find, search_mathlib) per problem.
+After 10 searches, you MUST stop searching and commit to writing a proof. The benchmark assumes
+the theorem is NOT in Mathlib — your job is to construct a proof from scratch, not to find an
+existing one. Searching Mathlib endlessly is a failure mode. If you've spent more than 5 turns
+searching without a proof attempt, write a `have`-based skeleton with `sorry` placeholders and
+start filling them. A partial proof with intermediate lemmas beats no proof.
 """
 
 
