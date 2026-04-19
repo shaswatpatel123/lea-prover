@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from .agent import run, list_sessions, DEFAULT_MODEL
+from .prompt import WORKSPACE
 
 
 def main():
@@ -23,6 +24,12 @@ def main():
     )
     parser.add_argument(
         "--max-turns", type=int, default=None, help="Max agent turns (default: unlimited)",
+    )
+    parser.add_argument(
+        "--sketch", action="store_true", help="Use the sketch prompt (produce a proof skeleton with sorry's).",
+    )
+    parser.add_argument(
+        "--fill", action="store_true", help="Use the fill prompt (fill sorry's in an existing file).",
     )
     parser.add_argument(
         "--resume", nargs="?", const=True, default=False,
@@ -49,12 +56,21 @@ def main():
             sys.exit(1)
         task = sys.stdin.read().strip()
 
+    # Select prompt variant
+    if args.sketch:
+        variant = "sketch"
+    elif args.fill:
+        variant = "fill"
+    else:
+        variant = "default"
+
     result = run(
         task=task or "",
         model=args.model,
         max_turns=args.max_turns,
         provider=args.provider,
         resume=args.resume,
+        prompt_variant=variant,
     )
     print(result)
 

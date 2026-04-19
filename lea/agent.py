@@ -96,13 +96,14 @@ def run(
     provider: str | None = None,
     resume: str | bool = False,
     return_transcript: bool = False,
+    prompt_variant: str = "default",
 ) -> str | tuple[str, dict]:
     """Run the agent on a formalization task.
 
     Returns the final assistant message, or (message, transcript_dict) if
     return_transcript is True.
     """
-    system = load_system_prompt()
+    system = load_system_prompt(prompt_variant)
 
     if resume:
         session_id_to_load = resume if isinstance(resume, str) else None

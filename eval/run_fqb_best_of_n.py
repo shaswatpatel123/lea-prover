@@ -1,0 +1,249 @@
+"""Evaluate Lea on FormalQualBench with best-of-N sampling.
+
+Runs each problem N times independently, records which attempts succeed,
+and reports the best-of-N pass rate.
+
+Usage:
+    python -m eval.run_fqb_best_of_n                          # default: 5 attempts
+    python -m eval.run_fqb_best_of_n --n 3                    # 3 attempts per problem
+    python -m eval.run_fqb_best_of_n --model gpt-4o           # try a different model
+    python -m eval.run_fqb_best_of_n --problems DeBruijnErdos # specific problem
+    python -m eval.run_fqb_best_of_n --resume results.json    # resume partial run
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FQB_DIR = REPO_ROOT / "FormalQualBench"
+PROBLEMS_DIR = FQB_DIR / "FormalQualBench"
+RESULTS_DIR = REPO_ROOT / "eval" / "results"
+
+
+def discover_problems(names: list[str] | None = None) -> list[Path]:
+    all_dirs = sorted([
+        d for d in PROBLEMS_DIR.iterdir()
+        if d.is_dir() and (d / "Main.lean").exists()
+    ])
+    if names:
+        selected = []
+        for name in names:
+            match = [d for d in all_dirs if d.name == name]
+            if not match:
+                sys.exit(f"Error: problem '{name}' not found.")
+            selected.extend(match)
+        return selected
+    return all_dirs
+
+
+def read_problem(problem_dir: Path) -> tuple[str, str]:
+    name = problem_dir.name
+    text = (problem_dir / "Main.lean").read_text()
+    statement = text.replace(":= by\n  sorry", "").replace(":= by sorry", "").strip()
+    return name, statement
+
+
+def verify_proof(proof_path: Path) -> tuple[bool, str]:
+    if not proof_path.exists():
+        return False, "Proof file not found"
+
+    content = proof_path.read_text()
+    if "sorry" in content:
+        return False, "Proof contains sorry"
+    for banned in ["axiom ", "native_decide", "exact?", "apply?", "simp?", "decide?"]:
+        if banned in content:
+            return False, f"Proof contains disallowed '{banned.strip()}'"
+
+    try:
+        result = subprocess.run(
+            ["lake", "env", "lean", str(proof_path)],
+            capture_output=True, text=True, timeout=600,
+            cwd=str(FQB_DIR),
+        )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        if result.returncode != 0:
+            return False, output if output else f"Exit code {result.returncode}"
+        if "declaration uses `sorry`" in output or "uses 'sorry'" in output:
+            return False, "Proof uses sorry (via tactic query)"
+        if "error" in output.lower():
+            return False, output
+        return True, output if output else "OK"
+    except subprocess.TimeoutExpired:
+        return False, "Compilation timed out (600s)"
+
+
+def run_single_attempt(problem_name: str, statement: str, model: str,
+                       max_turns: int | None, proof_dir: Path,
+                       transcript_dir: Path, attempt: int) -> dict:
+    from lea.agent import run
+
+    proof_path = proof_dir / f"{problem_name}_attempt{attempt}.lean"
+
+    task = (
+        f"Prove the following Lean 4 theorem. Write the complete proof "
+        f"(including all imports, namespace, and the theorem) to: {proof_path}\n\n"
+        f"```lean\n{statement}\n```\n\n"
+        f"The file must compile with `lake env lean` in the FormalQualBench project "
+        f"with zero errors, no `sorry`, and no custom `axiom` declarations.\n\n"
+        f"This is a research-level theorem. If you need intermediate lemmas, define them "
+        f"in the same file within the namespace. Use `exact?`, `apply?` via bash "
+        f"to find relevant Mathlib lemmas. Think carefully about the proof strategy before writing code."
+    )
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    start = time.time()
+    transcript = None
+    try:
+        agent_output, transcript = run(
+            task, model=model, max_turns=max_turns, return_transcript=True
+        )
+    except Exception as e:
+        agent_output = f"Agent error: {e}"
+    elapsed = time.time() - start
+    finished_at = datetime.now(timezone.utc).isoformat()
+
+    success, verify_output = verify_proof(proof_path)
+
+    # Save transcript
+    transcript_data = {
+        "problem": problem_name,
+        "attempt": attempt,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "time_s": round(elapsed, 1),
+        "success": success,
+        "verify_output": verify_output[:1000],
+    }
+    if transcript:
+        transcript_data["turns"] = transcript["turns"]
+        transcript_data["usage"] = transcript["usage"]
+        transcript_data["messages"] = transcript["messages"]
+
+    transcript_path = transcript_dir / f"{problem_name}_attempt{attempt}.json"
+    transcript_path.write_text(json.dumps(transcript_data, indent=2))
+
+    return {
+        "attempt": attempt,
+        "success": success,
+        "time_s": round(elapsed, 1),
+        "turns": transcript["turns"] if transcript else 0,
+        "usage": transcript["usage"] if transcript else {},
+        "verify_output": verify_output[:500],
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate Lea on FQB with best-of-N")
+    parser.add_argument("--n", type=int, default=5, help="Number of attempts per problem")
+    parser.add_argument("--model", default="gemini-3.1-pro-preview")
+    parser.add_argument("--max-turns", type=int, default=None)
+    parser.add_argument("--problems", nargs="+", default=None)
+    parser.add_argument("--resume", type=str, default=None)
+    args = parser.parse_args()
+
+    problems = discover_problems(args.problems)
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    run_name = f"fqb_best{args.n}_{timestamp}"
+    results_path = Path(args.resume) if args.resume else RESULTS_DIR / f"{run_name}.json"
+    transcript_dir = RESULTS_DIR / f"{run_name}_transcripts"
+    proof_dir = FQB_DIR / "eval_proofs_bon"
+
+    existing = {}
+    if args.resume and results_path.exists():
+        existing = json.loads(results_path.read_text())
+
+    results = existing.get("problems", {})
+
+    print(f"FormalQualBench best-of-{args.n}: {len(problems)} problems, model={args.model}")
+    print(f"Transcripts: {transcript_dir}")
+    if results:
+        done = sum(1 for r in results.values() if r.get("all_done"))
+        print(f"Resuming: {done} problems fully done")
+    print()
+
+    for problem_dir in problems:
+        name = problem_dir.name
+
+        # Check if this problem is fully done
+        if name in results and results[name].get("all_done"):
+            continue
+
+        problem_name, statement = read_problem(problem_dir)
+
+        # Figure out which attempts are already done
+        existing_attempts = results.get(name, {}).get("attempts", [])
+        done_attempt_nums = {a["attempt"] for a in existing_attempts}
+
+        for attempt in range(1, args.n + 1):
+            if attempt in done_attempt_nums:
+                continue
+
+            print(f"[{name}] attempt {attempt}/{args.n}", flush=True)
+
+            result = run_single_attempt(
+                problem_name, statement, args.model, args.max_turns,
+                proof_dir, transcript_dir, attempt,
+            )
+
+            if name not in results:
+                results[name] = {"attempts": [], "all_done": False}
+            results[name]["attempts"].append(result)
+
+            status = "PASS" if result["success"] else "FAIL"
+            print(f"  {status} ({result['time_s']}s, {result['turns']} turns)", flush=True)
+
+            # Early stop: if we got a pass, skip remaining attempts
+            if result["success"]:
+                print(f"  Solved on attempt {attempt}! Skipping remaining.", flush=True)
+                break
+
+        results[name]["all_done"] = True
+        any_pass = any(a["success"] for a in results[name]["attempts"])
+        results[name]["solved"] = any_pass
+
+        # Aggregate stats
+        total_solved = sum(1 for r in results.values() if r.get("solved"))
+        total_done = sum(1 for r in results.values() if r.get("all_done"))
+        print(f"  Best-of-{args.n}: {total_solved}/{total_done} solved so far\n", flush=True)
+
+        # Save after each problem
+        total_cost = 0
+        total_time = 0
+        for r in results.values():
+            for a in r.get("attempts", []):
+                usage = a.get("usage", {})
+                total_cost += (usage.get("input_tokens", 0) * 1.25 + usage.get("output_tokens", 0) * 10.0) / 1_000_000
+                total_time += a.get("time_s", 0)
+
+        output = {
+            "benchmark": "FormalQualBench",
+            "mode": f"best-of-{args.n}",
+            "model": args.model,
+            "max_turns": args.max_turns,
+            "solved": total_solved,
+            "total": total_done,
+            "pass_rate": round(100 * total_solved / total_done, 1) if total_done else 0,
+            "total_cost": round(total_cost, 2),
+            "total_time_s": round(total_time, 1),
+            "problems": results,
+        }
+        results_path.write_text(json.dumps(output, indent=2))
+
+    # Final summary
+    total_solved = sum(1 for r in results.values() if r.get("solved"))
+    print(f"\n{'='*50}")
+    print(f"FormalQualBench best-of-{args.n}: {total_solved}/{len(problems)} ({100*total_solved/len(problems):.1f}%)")
+    print(f"Results: {results_path}")
+    print(f"Transcripts: {transcript_dir}")
+
+
+if __name__ == "__main__":
+    main()
