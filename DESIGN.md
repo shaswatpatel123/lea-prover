@@ -10,16 +10,15 @@ Lea follows Pi's ethos of radical minimalism: if we don't need it, we don't buil
 - **Full observability**: every tool call, result, and model response is visible. No hidden orchestration.
 - **Trust over guardrails**: no permission prompts. The agent has full access to files and shell.
 - **Simple prompts**: frontier models already know how to be coding agents. Keep the system prompt short.
+- **Collaborator, not oracle**: Lea is a tool for mathematicians, not a replacement. Legibility, insight, and the ability to intervene matter as much as raw solve rate.
 
-## Current State
-
-### Architecture
+## Architecture
 
 ```
 User task (CLI) → agent loop → tool calls → Lean compilation → repeat until proof compiles
 ```
 
-### Tools (5)
+### Tools (6)
 
 | Tool | Purpose |
 |------|---------|
@@ -28,94 +27,124 @@ User task (CLI) → agent loop → tool calls → Lean compilation → repeat un
 | `edit_file` | Replace an exact substring in a file |
 | `lean_check` | Compile a `.lean` file via `lake env lean`, return diagnostics |
 | `search_mathlib` | Grep Mathlib source for lemma names / type patterns |
+| `bash` | Run a shell command (for `exact?`, `apply?`, `lake build`, etc.) |
 
-### Agent loop (`agent.py`)
+### Implemented features
 
-- Gemini-only, synchronous, blocking.
-- 30-turn hard cap.
-- Verbose mode (`-v`) prints tool calls and results.
-- Non-verbose mode is silent until the final response.
+1. **Streaming output** — all model output streams in real time. Every tool call and result is visible as it happens.
+2. **Multi-provider support** — Gemini, Anthropic, OpenAI via a thin provider abstraction in `providers.py`. Auto-detected from model name or set with `-p`.
+3. **No default turn limit** — the agent runs until the model stops calling tools. `--max-turns` available as an optional safety valve.
+4. **Bash tool** — the agent can run arbitrary shell commands, enabling `exact?`, `apply?`, `grep`, `lake build`, etc.
+5. **Project-level prompt customization** — drop a `lea.md` file in the workspace to append project-specific instructions to the system prompt.
+6. **Session persistence** — full conversation history saved to `~/.lea/sessions/` after each run. Resume with `--resume`.
+7. **Cost and token tracking** — cumulative input/output tokens and estimated cost printed at the end of each run.
 
-### System prompt (`prompt.py`)
+### Evaluation
 
-~400 tokens. Describes the workspace path, a 7-step workflow, style rules, and critical rules (stop on success, never invent lemma names, etc.).
-
-### CLI (`cli.py`)
-
-`lea "task"` or `echo "task" | lea`. Flags: `-m MODEL`, `--max-turns N`, `-v`.
+Eval harness at `eval/run_minif2f.py` runs Lea against the [miniF2F](https://github.com/yangky11/miniF2F-lean4) benchmark (488 competition-level problems). Per-problem transcripts with timestamps saved to `eval/results/`. Early results: ~84% on the validation split with Gemini 3.1 Pro.
 
 ---
 
-## Planned Features
+## Limitations of the current design
 
-### 1. Streaming output :white_check_mark:
+Lea's single-loop architecture -- write proof, compile, read errors, fix, repeat -- works well on competition math where proofs are short (less than 50 lines). 
 
-**Problem**: The agent blocks silently for minutes. In non-verbose mode, you see nothing until it finishes. Even in verbose mode, output only appears after each full model response.
+But my guess is that this breaks down on harder, graduate-level mathematics:
 
-**Design**: Always stream model output as it arrives — text tokens printed immediately, tool calls shown as they're invoked, tool results printed inline. Remove the verbose/non-verbose distinction; the agent should always be observable.
+1. **No proof structure.** The agent tries to write the entire proof in one shot. For a theorem requiring intermediate lemmas (which is most real mathematics), it either produces an unmanageable monolith or gets lost.
 
-### 2. Multi-provider support :white_check_mark:
+2. **Blind retries.** When a proof attempt fails, the agent sees only compiler errors. It has no mechanism to step back and reconsider its strategy; it just edits the same broken proof. This leads to loops where the agent makes the same mistake repeatedly.
 
-**Problem**: Hardcoded to Gemini (`google-genai`). Can't use Claude, GPT, etc.
+3. **No awareness of proof state.** The agent doesn't know what it needs to prove at each `sorry`. It guesses from error messages rather than inspecting the actual goal. Lean has tools for this (`exact?`, `apply?`, `#check`) but the current prompt does not guide the agent to use them.
 
-**Design**: Introduce a thin provider abstraction in a new `providers.py` module. Each provider implements:
-- `create_client(api_key) -> client`
-- `generate(client, model, system, messages, tools) -> stream of events`
+4. **Single strategy.** Every problem gets the same approach: try simple tactics, if this fails then start searching Mathlib. There is no mechanism to try fundamentally different or involved proof strategies or to reflect upon failed attempts.
 
-Event types: `text_delta`, `tool_call`, `tool_result`, `done`.
+## Planned features
 
-Provider is selected based on model name prefix or a `-p` flag. Supported providers:
-- `gemini-*` → Google GenAI
-- `claude-*` → Anthropic
-- `gpt-*` / `o3*` → OpenAI
+The next version of Lea would address these limitations with a **sketch–fill–reflect loop**, inspired by [DeltaProver](https://arxiv.org/html/2507.15225) (95.9% miniF2F) and [DeepSeek-Prover-V2](https://arxiv.org/html/2504.21801v1). The key ideas are:
 
-Dependencies (`anthropic`, `openai`) are optional — import only when the provider is selected.
+- Break a proof into a chain of `have` statements with `sorry` (this is the sketch phase).
+- Fill each `sorry` independently (this is the fill phase).
+- If some `sorry`s can't be filled, reflect on why, and resketch (this is the reflect phase).
 
-### 3. Remove turn limit :white_check_mark:
+This maps onto Lean's `have` construct, which introduces intermediate results that subsequent steps can use. The decomposition is itself a valid (but incomplete) Lean proof, so Lean's type checker validates the proof structure even before the details are filled in.
 
-**Problem**: The 30-turn hard cap can cut off proofs that are making progress. Pi explicitly has no step limit.
-
-**Design**: Remove `MAX_TURNS` as a default. The agent runs until the model stops calling tools. Keep `--max-turns` as an optional safety valve (default: unlimited), but don't enforce it by default.
-
-### 4. Bash tool :white_check_mark:
-
-**Problem**: The agent can only interact with Lean through `lean_check` and `search_mathlib`. It can't run `lake build`, inspect `.lake` state, use `exact?` / `apply?` interactively, or do anything else in the shell.
-
-**Design**: Add a `bash` tool:
-- `command` (string): the shell command to run.
-- `timeout` (int, optional): timeout in seconds, default 120.
-- Returns stdout + stderr, truncated to 10,000 chars.
-- Synchronous execution, no background processes.
-
-This subsumes `search_mathlib` — the agent can just `grep` Mathlib directly. Keep `search_mathlib` for now as a convenience, but it's no longer essential.
-
-### 5. Project-level prompt customization (`lea.md`) :white_check_mark:
-
-**Problem**: System prompt is hardcoded in `prompt.py`. Can't customize strategy per-project without editing source.
-
-**Design**: On startup, look for a `lea.md` file in the workspace root (or current directory). If found, append its contents to the system prompt. This lets users add project-specific rules, preferred tactics, import conventions, etc.
-
-Load order: base system prompt → `lea.md` (if present).
-
-### 6. Session persistence :white_check_mark:
-
-**Problem**: All context is lost when the agent exits. Can't resume a failed proof attempt.
-
-**Design**: Save the full conversation history (messages + tool results) to a JSON file after each run. Store in `~/.lea/sessions/` with timestamp-based filenames.
-
-CLI additions:
-- `lea --resume` — continue the most recent session.
-- `lea --resume SESSION_ID` — continue a specific session.
-- `lea --sessions` — list past sessions.
-
-### 7. Cost and token tracking :white_check_mark:
-
-**Problem**: No visibility into how many tokens or dollars a proof attempt costs.
-
-**Design**: After each model response, extract token counts from the API response metadata. Track cumulative input/output tokens and estimated cost. Print a summary line at the end of each run:
+### The loop
 
 ```
-✓ Proof complete. 3 turns, 12,847 tokens ($0.04)
+┌─────────────────────────────────────────────────┐
+│                                                 │
+│   1. SKETCH                                     │
+│      Write a proof skeleton:                    │
+│        have h1 : ... := sorry                   │
+│        have h2 : ... := sorry                   │
+│        exact combine h1 h2                      │
+│      Compile to verify the skeleton type-checks │
+│                                                 │
+│   2. FILL                                       │
+│      For each sorry, run a Lea proving loop:    │
+│        - try simple tactics (norm_num, simp)    │
+│        - use exact?, apply? via bash            │
+│        - search Mathlib if needed               │
+│      Each sorry is an independent sub-problem.  │
+│      (Can run in parallel.)                     │
+│                                                 │
+│   3. CHECK                                      │
+│      If all sorry's filled and proof compiles:  │
+│        → DONE                                   │
+│      If some sorry's remain:                    │
+│        → continue to REFLECT                    │
+│                                                 │
+│   4. REFLECT                                    │
+│      Feed back which subgoals failed and why.   │
+│      Ask for a NEW sketch with a different      │
+│      decomposition strategy.                    │
+│        → go to 1                                │
+│                                                 │
+└─────────────────────────────────────────────────┘
 ```
 
-Token counts come from the API response; cost is estimated from a simple per-model price table.
+### What changes in the codebase
+
+The decompose-and-prove loop is a layer over the existing `run()` function with specialized prompts for each phase. The agent's minimalist tool set stays the same, but there are three new prompts:
+
+- **Sketch prompt**: "You are writing a proof outline. Use `have` statements with `sorry` to express the structure. Do NOT fill in the details — only write the skeleton. The skeleton must compile (with sorry warnings, but no errors)."
+
+- **Fill prompt**: "You are filling in a single `sorry` in an existing proof. The goal state is: `<goal>`. Try `exact?`, `apply?`, `simp`, `norm_num`. Do not modify anything outside this sorry."
+
+- **Reflect prompt**: "The following subgoals could not be proved: `<list>`. Here are the errors. Analyze why the decomposition failed. Write a NEW proof skeleton with a different strategy."
+
+
+### Why this stays minimal
+
+- **No new tools**: same 6 tools, same provider abstraction.
+- **No MCP or LSP**: the agent uses `exact?` and `apply?` via the existing `bash` tool.
+- **Prompts do the work**: the three phases differ only in their system prompt, not in code.
+- **Legible to humans**: the sketch is a readable proof outline. A mathematician can inspect it, approve it, or modify it before the fill phase runs.
+
+### CLI and strategy selection
+
+The CLI stays the same: `lea "prove XYZ"`. The model decides whether to decompose or prove directly, based on the theorem's complexity. Simple theorems get proved in one shot; hard theorems get sketched, filled, and reflected. Optional hooks for interactive use:
+
+- `lea --sketch "task"` — produce the sketch and stop, so a mathematician can review or edit before filling.
+- `lea --fill path/to/sketch.lean` — fill sorry's in an existing file.
+
+### Observability
+
+Every phase leaves artifacts on disk. For a problem `foo`, the workspace accumulates:
+
+```
+workspace/proofs/
+  foo.lean                  # final proof (or latest attempt)
+  foo.sketch.1.lean         # first sketch
+  foo.sketch.2.lean         # re-sketch after reflection (if any)
+  foo.reflect.1.md          # reflection: what failed and why
+```
+
+The sketch files are valid (incomplete) Lean since they compile with sorry warnings. The reflect files are natural-language analysis. A mathematician can read the sequence to understand what the agent tried and why it changed strategy. Session transcripts (in `~/.lea/sessions/`) capture the full conversation for each phase, including all tool calls and results.
+
+### Evaluation plan
+
+- Run on miniF2F with `prove_hard` and compare to single-loop `run()`.
+- Run on [FormalQualBench](https://www.math.inc/formalqualbench) (23 graduate-level theorems) as the real target.
+- Track pass rate, turns per problem, tokens per problem, number of re-sketches needed.
