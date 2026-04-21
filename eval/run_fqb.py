@@ -9,12 +9,12 @@ Usage:
 
 import argparse
 import json
-import re
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from eval.utils.verify import verify_proof as _safe_verify
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -56,35 +56,10 @@ def read_problem(problem_dir: Path) -> tuple[str, str]:
     return name, statement
 
 
-def verify_proof(proof_path: Path) -> tuple[bool, str]:
-    """Compile a proof file against the FormalQualBench Lake project."""
-    if not proof_path.exists():
-        return False, "Proof file not found"
-
-    content = proof_path.read_text()
-    if "sorry" in content:
-        return False, "Proof contains sorry"
-    for banned in ["axiom ", "native_decide", "exact?", "apply?", "simp?", "decide?"]:
-        if banned in content:
-            return False, f"Proof contains disallowed '{banned.strip()}'"
-
-    try:
-        result = subprocess.run(
-            ["lake", "env", "lean", str(proof_path)],
-            capture_output=True, text=True, timeout=600,
-            cwd=str(FQB_DIR),
-        )
-        output = (result.stdout + "\n" + result.stderr).strip()
-        if result.returncode != 0:
-            return False, output if output else f"Exit code {result.returncode}"
-        # Check for sorry in compiler output (apply?/exact? leave sorry behind)
-        if "declaration uses `sorry`" in output or "uses 'sorry'" in output:
-            return False, "Proof uses sorry (via tactic query)"
-        if "error" in output.lower():
-            return False, output
-        return True, output if output else "OK"
-    except subprocess.TimeoutExpired:
-        return False, "Compilation timed out (600s)"
+def verify_proof(proof_path: Path, problem_name: str) -> tuple[bool, str]:
+    """Verify via SafeVerify: kernel replay + declaration match + axiom whitelist."""
+    target_src = PROBLEMS_DIR / problem_name / "Main.lean"
+    return _safe_verify(target_src=target_src, submission_src=proof_path, lake_project=FQB_DIR)
 
 
 def run_agent(problem_name: str, statement: str, model: str, max_turns: int | None,
@@ -120,7 +95,7 @@ def run_agent(problem_name: str, statement: str, model: str, max_turns: int | No
     finished_at = datetime.now(timezone.utc).isoformat()
 
     # Verify
-    success, verify_output = verify_proof(proof_path)
+    success, verify_output = verify_proof(proof_path, problem_name)
 
     # Save transcript
     transcript_data = {
