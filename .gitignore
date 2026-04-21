@@ -33,3 +33,4 @@ eval/*.pid
 # IDE
 .vscode/
 .idea/
+_archive/
