@@ -45,7 +45,7 @@ This directory is inside a Lake project with Mathlib available.
 2. Run lean_check to verify the sketch type-checks.
 3. Fill each `sorry` one at a time. For each non-trivial `sorry`:
    - First, try `exact?` or `apply?` via bash to find the right lemma.
-   - If that doesn't land, generate **2-3 candidate proofs** covering distinct strategies: (A) direct `exact <term>`, (B) tactic sequence, (C) automation (`simp [...]`, `grind`, `aesop`), (D) premise-based when `loogle` returns strong hits (`simp only [p1, p2]`, `grind [p1, p2]`).
+   - If that doesn't land, generate **2-3 candidate proofs** covering distinct strategies: (A) direct `exact <term>`, (B) tactic sequence (e.g. `intro ... <;> simp <;> linarith`), (C) automation (`simp [...]`, `grind`, `aesop`).
    - Write each candidate to its own scratch .lean file containing just the goal, compile all with `lean_check`, pick the shortest that passes, then edit the main file once.
    - Only after exhausting candidates, search Mathlib for more lemmas.
 4. After filling all sorrys, run lean_check on the complete proof.
@@ -55,12 +55,9 @@ with a different proof strategy.
 
 ## Using `exact?` and `apply?`
 
-These are your most powerful tools for finding Mathlib lemmas. Run them via bash:
-```
-echo 'example : 2 + 3 = 5 := by exact?' | lake env lean --stdin
-```
-Or write a small .lean file with the goal and `exact?`/`apply?`, then compile it. \
-The output will suggest the exact tactic to use. Prefer this over grepping Mathlib source files.
+These are your most powerful tools for finding Mathlib lemmas. To use them: write a scratch .lean file containing the goal with `exact?` or `apply?`, then use `lean_check` to compile it. The output will suggest the exact tactic to use.
+
+Use `lean_check` for ALL .lean compilation. Do not invoke `lake env lean` via `bash` — the cwd handling is brittle and causes "No directory 'Mathlib'" errors. `lean_check` auto-detects the lake root.
 
 ## Style
 - Start files with `import Mathlib` when needed.
@@ -111,23 +108,13 @@ Translate natural-language proof moves to Lean 4 idioms:
 - NEVER use `axiom`, `sorry`, `native_decide`, or `Decidable.em` in final proofs.
 - **Never modify the theorem statement.** Declaration headers — everything from `theorem` / `def` / `lemma` through `:= by` — are immutable. Do not rewrite the name, binders, type signature, or the statement itself. If you believe the statement is wrong or unprovable, stop and report it. Redefining a name or weakening the statement does not count as a proof.
 - NEVER leave `exact?`, `apply?`, `simp?`, or `decide?` in final proofs. Replace them with the tactic they suggest.
-- NEVER invent lemma names. Use `exact?`/`apply?`, `loogle` (semantic signature search), or `search_mathlib` (keyword grep) to find real ones. Prefer `loogle` when you know the signature shape of the lemma you need.
-- **loogle syntax that works:**
-  - Exact name: `Continuous.mul`
-  - Name prefix (finds all members of a namespace): `Set.centralizer`, `LinearIsometryEquiv.norm`
-  - Type signature with `_` holes: `Continuous _ → Continuous _ → Continuous (_ * _)`
-  - Goal-shaped (preferred for proof-state queries): `|- _ * 0 = 0` or `|- Set.centralizer _ = _`
-- **loogle syntax that fails — AVOID:**
-  - Bare words without dots like `centralizer` (error: "unknown identifier")
-  - Metavariable queries like `?a + ?b = ?b + ?a` (heartbeat timeout)
-  - Non-canonical notation like `C(_, _)` — use full name `ContinuousMap` with `_` holes
-- If `loogle` returns an error or times out ONCE, it may be transient — retry once before falling back to `search_mathlib`.
+- NEVER invent lemma names. Use `exact?`/`apply?` or `search_mathlib` to find real ones.
 - If you've failed 3+ times on the same sub-goal with the same approach, try a completely different strategy. Do not keep editing the same broken proof.
 - Report clearly if a statement appears to be false or unprovable.
 
 ## Search budget (IMPORTANT)
-You have a HARD budget of 20 Mathlib searches (grep/find in Mathlib source, `search_mathlib`,
-or `loogle` calls) per problem across ALL turns. Count them yourself. After 20 searches, you MUST stop
+You have a HARD budget of 20 Mathlib searches (grep/find in Mathlib source or `search_mathlib`
+calls) per problem across ALL turns. Count them yourself. After 20 searches, you MUST stop
 searching and commit to writing the proof from scratch using a `have`-based skeleton with
 `sorry` placeholders. The benchmark assumes the theorem is NOT in Mathlib — endless searching
 is a failure mode. A partial proof with intermediate lemmas beats no proof.
