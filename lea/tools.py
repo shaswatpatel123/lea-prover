@@ -88,6 +88,33 @@ TOOLS_SCHEMA = [
             "required": ["query"],
         },
     },
+    {
+        "name": "loogle",
+        "description": (
+            "Semantic Mathlib lemma search via loogle.lean-lang.org. "
+            "Searches by type signature, name, or hypothesis pattern — much more "
+            "goal-shaped than search_mathlib (which is plain grep). "
+            "Pattern examples: 'Continuous _ → Continuous _ → Continuous _', "
+            "'?a + ?b = ?b + ?a', 'LinearIsometryEquiv', 'Real.sqrt _ ≤ _'. "
+            "Use _ for anonymous blanks and ?a for named metavariables. "
+            "Prefer loogle over search_mathlib when you know the signature shape."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Loogle pattern: signature with _ or ?a holes, lemma name fragment, or keyword.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum hits to return (default 15).",
+                    "default": 15,
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -223,6 +250,45 @@ def search_mathlib(query: str, max_results: int = 10) -> str:
         return "Error: search timed out."
 
 
+def loogle(query: str, max_results: int = 15) -> str:
+    """Semantic Mathlib lemma search via loogle.lean-lang.org."""
+    import json
+    import urllib.parse
+    import urllib.request
+
+    url = "https://loogle.lean-lang.org/json?q=" + urllib.parse.quote(query)
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        return f"Error: loogle request failed ({type(e).__name__}): {e}"
+
+    if "error" in data:
+        msg = f"Loogle error: {data['error']}"
+        sugg = data.get("suggestions") or []
+        if sugg:
+            msg += "\nSuggestions: " + ", ".join(sugg[:5])
+        return msg
+
+    hits = data.get("hits", [])
+    if not hits:
+        return f"No loogle results for '{query}'."
+
+    lines = []
+    for h in hits[:max_results]:
+        name = h.get("name", "?")
+        typ = " ".join(h.get("type", "").split())
+        if len(typ) > 200:
+            typ = typ[:200] + "…"
+        mod = h.get("module", "")
+        short_mod = mod.removeprefix("Mathlib.") if mod.startswith("Mathlib.") else mod
+        lines.append(f"  {name} : {typ}  [{short_mod}]")
+
+    count = data.get("count", len(hits))
+    header = f"Loogle: {count} hits (showing top {min(max_results, len(hits))})"
+    return header + "\n" + "\n".join(lines)
+
+
 # Dispatch table
 TOOL_HANDLERS = {
     "bash": lambda args: bash(args["command"], args.get("timeout", 120)),
@@ -231,4 +297,5 @@ TOOL_HANDLERS = {
     "edit_file": lambda args: edit_file(args["path"], args["old_string"], args["new_string"]),
     "lean_check": lambda args: lean_check(args["path"]),
     "search_mathlib": lambda args: search_mathlib(args["query"], args.get("max_results", 10)),
+    "loogle": lambda args: loogle(args["query"], args.get("max_results", 15)),
 }

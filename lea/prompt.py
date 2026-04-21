@@ -72,13 +72,13 @@ The output will suggest the exact tactic to use. Prefer this over grepping Mathl
 - NEVER claim success until lean_check passes with zero errors.
 - NEVER use `axiom`, `sorry`, `native_decide`, or `Decidable.em` in final proofs.
 - NEVER leave `exact?`, `apply?`, `simp?`, or `decide?` in final proofs. Replace them with the tactic they suggest.
-- NEVER invent lemma names. Use `exact?`/`apply?` or `search_mathlib` to find real ones.
+- NEVER invent lemma names. Use `exact?`/`apply?`, `loogle` (semantic signature search), or `search_mathlib` (keyword grep) to find real ones. Prefer `loogle` when you know the signature shape of the lemma you need.
 - If you've failed 3+ times on the same sub-goal with the same approach, try a completely different strategy. Do not keep editing the same broken proof.
 - Report clearly if a statement appears to be false or unprovable.
 
 ## Search budget (IMPORTANT)
-You have a HARD budget of 20 Mathlib searches (grep/find in Mathlib source, or search_mathlib
-calls) per problem across ALL turns. Count them yourself. After 20 searches, you MUST stop
+You have a HARD budget of 20 Mathlib searches (grep/find in Mathlib source, `search_mathlib`,
+or `loogle` calls) per problem across ALL turns. Count them yourself. After 20 searches, you MUST stop
 searching and commit to writing the proof from scratch using a `have`-based skeleton with
 `sorry` placeholders. The benchmark assumes the theorem is NOT in Mathlib — endless searching
 is a failure mode. A partial proof with intermediate lemmas beats no proof.
