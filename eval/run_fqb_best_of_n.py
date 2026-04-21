@@ -80,7 +80,8 @@ def verify_proof(proof_path: Path) -> tuple[bool, str]:
 
 def run_single_attempt(problem_name: str, statement: str, model: str,
                        max_turns: int | None, proof_dir: Path,
-                       transcript_dir: Path, attempt: int) -> dict:
+                       transcript_dir: Path, attempt: int,
+                       prev_failure: str | None = None) -> dict:
     from lea.agent import run
 
     proof_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +98,16 @@ def run_single_attempt(problem_name: str, statement: str, model: str,
         f"in the same file within the namespace. Use `exact?`, `apply?` via bash "
         f"to find relevant Mathlib lemmas. Think carefully about the proof strategy before writing code."
     )
+
+    if prev_failure:
+        task += (
+            f"\n\n## Your previous attempt failed\n"
+            f"Final `lean_check` / verifier output from the previous attempt:\n"
+            f"```\n{prev_failure[:500]}\n```\n"
+            f"This is attempt {attempt}. Try a meaningfully different approach — "
+            f"either a different proof decomposition or different Mathlib lemmas. "
+            f"Do not repeat the same mistake."
+        )
 
     started_at = datetime.now(timezone.utc).isoformat()
     start = time.time()
@@ -147,6 +158,8 @@ def main():
     parser.add_argument("--max-turns", type=int, default=None)
     parser.add_argument("--problems", nargs="+", default=None)
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--feedback", action="store_true",
+                        help="Feed the previous failed attempt's verifier output to the next attempt.")
     args = parser.parse_args()
 
     problems = discover_problems(args.problems)
@@ -187,17 +200,26 @@ def main():
         # Figure out which attempts are already done
         existing_attempts = results.get(name, {}).get("attempts", [])
         done_attempt_nums = {a["attempt"] for a in existing_attempts}
+        # Seed prev_failure from the most recent completed failed attempt (for resume)
+        prev_failure = None
+        if args.feedback and existing_attempts:
+            last_fail = next((a for a in reversed(existing_attempts) if not a.get("success")), None)
+            if last_fail:
+                prev_failure = last_fail.get("verify_output") or None
 
         for attempt in range(1, args.n + 1):
             if attempt in done_attempt_nums:
                 continue
 
-            print(f"[{name}] attempt {attempt}/{args.n}", flush=True)
+            print(f"[{name}] attempt {attempt}/{args.n}{' [with feedback]' if (args.feedback and prev_failure) else ''}", flush=True)
 
             result = run_single_attempt(
                 problem_name, statement, args.model, args.max_turns,
                 proof_dir, transcript_dir, attempt,
+                prev_failure=prev_failure if args.feedback else None,
             )
+            if args.feedback:
+                prev_failure = result.get("verify_output") if not result["success"] else None
 
             if name not in results:
                 results[name] = {"attempts": [], "all_done": False}
