@@ -43,11 +43,10 @@ This directory is inside a Lake project with Mathlib available.
 1. First, write a **proof sketch**: a .lean file where the main theorem is decomposed into \
 `have` statements, each with `sorry`. The sketch must compile (sorry warnings OK, errors NOT OK).
 2. Run lean_check to verify the sketch type-checks.
-3. Fill each `sorry` one at a time. For each non-trivial `sorry`:
-   - First, try `exact?` or `apply?` via bash to find the right lemma.
-   - If that doesn't land, generate **2-3 candidate proofs** covering distinct strategies: (A) direct `exact <term>`, (B) tactic sequence (e.g. `intro ... <;> simp <;> linarith`), (C) automation (`simp [...]`, `grind`, `aesop`).
-   - Write each candidate to its own scratch .lean file containing just the goal, compile all with `lean_check`, pick the shortest that passes, then edit the main file once.
-   - Only after exhausting candidates, search Mathlib for more lemmas.
+3. Fill each `sorry` one at a time. For each:
+   - Try simple tactics first: `rfl`, `simp`, `norm_num`, `omega`, `linarith`, `decide`.
+   - Try `exact?` or `apply?`: write a scratch .lean file with the goal and run `lean_check`.
+   - If those fail, use `search_mathlib` for relevant lemmas.
 4. After filling all sorrys, run lean_check on the complete proof.
 5. If some sorrys can't be filled after several attempts, **reflect**: \
 step back and ask whether the decomposition is wrong. Consider rewriting the sketch \
