@@ -1,0 +1,23 @@
+# Keep the build context small: only Lake metadata files end up shipped to docker.
+# Multi-GB local build caches and unrelated dirs are excluded.
+
+FormalQualBench/.lake/
+FormalQualBench/eval_proofs*/
+FormalQualBench/FormalQualBench/
+miniF2F-lean4/.lake/
+miniF2F-lean4/eval_proofs/
+miniF2F-lean4/MiniF2F/
+miniF2F-lean4/MiniF2F.lean
+miniF2F-lean4/LICENSE
+miniF2F-lean4/README.md
+putnam-lean4/
+workspace/
+third_party/
+mini-swe-agent/
+eval/results/
+fqb-reports/
+logs/
+.git/
+**/__pycache__/
+**/.DS_Store
+*.pyc

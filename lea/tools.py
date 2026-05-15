@@ -1,9 +1,20 @@
-"""Lea's six tools — the minimum surface area for Lean formalization."""
+"""Lea's six tools — the minimum surface area for Lean formalization.
 
-import os
-import subprocess
-import tempfile
-from pathlib import Path
+Every tool routes its file I/O and command execution through an Environment.
+Pass `env=LocalEnvironment(<lake_project_dir>)` for serial host runs, or
+`env=DockerEnvironment(image, project_root)` for isolated parallel runs.
+
+TOOLS_SCHEMA is unchanged — the model API does not care which env we use.
+TOOL_HANDLERS is now a factory `build_handlers(env)` so each agent run binds
+its own env without module-level state.
+"""
+
+import posixpath
+import shlex
+from typing import Callable
+
+from .env import Environment, EnvironmentError
+
 
 TOOLS_SCHEMA = [
     {
@@ -46,7 +57,7 @@ TOOLS_SCHEMA = [
     },
     {
         "name": "lean_check",
-        "description": "Compile a .lean file and return diagnostics (errors, warnings, goals). Uses `lake env lean` if inside a Lake project, otherwise `lean` directly.",
+        "description": "Compile a .lean file and return diagnostics (errors, warnings, goals). Uses `lake env lean` with the env's project as the Lake root.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -73,7 +84,7 @@ TOOLS_SCHEMA = [
     },
     {
         "name": "search_mathlib",
-        "description": "Search Mathlib for lemmas/theorems matching a query. Greps Mathlib source files for the query string. If you are proving in a specific Lake project (e.g., miniF2F, FormalQualBench), pass `path` so the search uses THAT project's Mathlib version — different projects pin different Mathlib versions, and a hit in the wrong version is worse than no hit.",
+        "description": "Search Mathlib for lemmas/theorems matching a query. Greps Mathlib source files inside the current project's `.lake/packages/mathlib/`.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -86,10 +97,6 @@ TOOLS_SCHEMA = [
                     "description": "Maximum number of results to return.",
                     "default": 10,
                 },
-                "path": {
-                    "type": "string",
-                    "description": "Optional path to a .lean file or directory inside a Lake project. If provided, search Mathlib in that project's Lake packages instead of the default workspace Mathlib.",
-                },
             },
             "required": ["query"],
         },
@@ -97,172 +104,145 @@ TOOLS_SCHEMA = [
 ]
 
 
-def _find_lake_root(path: str) -> str | None:
-    """Walk up from path looking for lakefile.lean or lakefile.toml."""
-    p = Path(path).resolve()
-    for parent in [p.parent, *p.parent.parents]:
-        if (parent / "lakefile.lean").exists() or (parent / "lakefile.toml").exists():
-            return str(parent)
-    return None
+# ----------------------------------------------------------------------------
+# Path handling
+# ----------------------------------------------------------------------------
+
+def _to_rel(env: Environment, path: str) -> str:
+    """Normalize `path` (relative or absolute) to a project-relative posix path.
+    Rejects paths that escape `env.project_root`."""
+    if path.startswith("/"):
+        # Allow absolute paths that fall under project_root.
+        if path == env.project_root:
+            return ""
+        prefix = env.project_root.rstrip("/") + "/"
+        if not path.startswith(prefix):
+            raise EnvironmentError(f"path outside project root: {path}")
+        return path[len(prefix):]
+    # Relative — but reject `..` escape just in case.
+    norm = posixpath.normpath(path)
+    if norm.startswith("..") or norm == "..":
+        raise EnvironmentError(f"path outside project root: {path}")
+    return norm
 
 
-def read_file(path: str, start_line: int | None = None, end_line: int | None = None) -> str:
-    p = Path(path).expanduser()
-    if not p.exists():
-        return f"Error: {p} does not exist."
-    text = p.read_text()
+# ----------------------------------------------------------------------------
+# Tools
+# ----------------------------------------------------------------------------
+
+def read_file(env: Environment, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
+    rel = _to_rel(env, path)
+    if not env.exists(rel):
+        return f"Error: {path} does not exist."
+    text = env.read_file(rel).decode("utf-8", errors="replace")
     if start_line is None and end_line is None:
         return text
     lines = text.splitlines(keepends=True)
     s = max(0, (start_line or 1) - 1)
     e = end_line if end_line is not None else len(lines)
     sliced = "".join(lines[s:e])
-    header = f"# lines {s + 1}-{min(e, len(lines))} of {len(lines)} in {p}\n"
+    header = f"# lines {s + 1}-{min(e, len(lines))} of {len(lines)} in {rel}\n"
     return header + sliced
 
 
-def write_file(path: str, content: str) -> str:
-    p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
-    return f"Wrote {len(content)} bytes to {p}"
+def write_file(env: Environment, path: str, content: str) -> str:
+    rel = _to_rel(env, path)
+    env.write_file(rel, content.encode("utf-8"))
+    return f"Wrote {len(content)} bytes to {rel}"
 
 
-def edit_file(path: str, old_string: str, new_string: str) -> str:
-    p = Path(path).expanduser()
-    if not p.exists():
-        return f"Error: {p} does not exist."
-    text = p.read_text()
+def edit_file(env: Environment, path: str, old_string: str, new_string: str) -> str:
+    rel = _to_rel(env, path)
+    if not env.exists(rel):
+        return f"Error: {path} does not exist."
+    text = env.read_file(rel).decode("utf-8", errors="replace")
     count = text.count(old_string)
     if count == 0:
         return "Error: old_string not found in file."
     if count > 1:
         return f"Error: old_string appears {count} times. Provide more context to make it unique."
-    p.write_text(text.replace(old_string, new_string, 1))
+    env.write_file(rel, text.replace(old_string, new_string, 1).encode("utf-8"))
     return "OK"
 
 
-def lean_check(path: str) -> str:
-    p = Path(path).resolve()
-    if not p.exists():
-        return f"Error: {p} does not exist."
-
-    lake_root = _find_lake_root(str(p))
-    if lake_root:
-        cmd = ["lake", "env", "lean", str(p)]
-        cwd = lake_root
-    else:
-        cmd = ["lean", str(p)]
-        cwd = str(p.parent)
-
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, cwd=cwd
-        )
-        output = (result.stdout + "\n" + result.stderr).strip()
-        if result.returncode == 0 and not output:
-            return "OK — no errors, no warnings."
-        return output if output else f"Exit code {result.returncode} (no output)."
-    except subprocess.TimeoutExpired:
+def lean_check(env: Environment, path: str) -> str:
+    rel = _to_rel(env, path)
+    if not env.exists(rel):
+        return f"Error: {path} does not exist."
+    rc, output = env.execute(
+        f"lake env lean {shlex.quote(rel)}",
+        cwd=env.project_root,
+        timeout=120,
+    )
+    output = output.strip()
+    if rc == 0 and not output:
+        return "OK — no errors, no warnings."
+    if rc == -1 and "timeout" in output:
         return "Error: lean timed out after 120s."
-    except FileNotFoundError:
-        return "Error: `lean` or `lake` not found. Is Lean 4 installed?"
+    return output if output else f"Exit code {rc} (no output)."
 
 
-def bash(command: str, timeout: int = 120) -> str:
-    try:
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=timeout
+def bash(env: Environment, command: str, timeout: int = 120) -> str:
+    rc, output = env.execute(command, timeout=timeout)
+    output = output.strip()
+    if not output:
+        return f"(no output, exit code {rc})"
+    if len(output) > 10000:
+        output = output[:10000] + "\n... (truncated)"
+    return output
+
+
+def search_mathlib(env: Environment, query: str, max_results: int = 10) -> str:
+    """Grep the env's Mathlib (`.lake/packages/mathlib/Mathlib/`) for `query`.
+
+    Strategy: find files that match, then pull up to two matching lines per
+    file. Caps total lines returned at `max_results`. Returns a friendly
+    'no results' message when nothing matches.
+    """
+    mathlib = ".lake/packages/mathlib/Mathlib"
+    if not env.exists(mathlib):
+        return f"Error: Mathlib not found at {mathlib} inside the env."
+
+    q = shlex.quote(query)
+    ml = shlex.quote(mathlib)
+    # First pass: list files containing the query.
+    rc, files_out = env.execute(
+        f"grep -rl --include='*.lean' {q} {ml}",
+        timeout=30,
+    )
+    if rc != 0 and not files_out.strip():
+        return f"No Mathlib results for {query!r}."
+    files = [f for f in files_out.strip().splitlines() if f][:max_results]
+    if not files:
+        return f"No Mathlib results for {query!r}."
+
+    lines: list[str] = []
+    for f in files:
+        rc, hit_out = env.execute(
+            f"grep -n {q} {shlex.quote(f)} | head -2",
+            timeout=10,
         )
-        output = (result.stdout + result.stderr).strip()
-        if not output:
-            return f"(no output, exit code {result.returncode})"
-        if len(output) > 10000:
-            output = output[:10000] + "\n... (truncated)"
-        return output
-    except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s."
-
-
-WORKSPACE = Path(__file__).resolve().parent.parent / "workspace"
-
-
-def _mathlib_for_lake_root(lake_root: Path) -> Path | None:
-    for sub in (".lake/packages/mathlib/Mathlib", "lake-packages/mathlib/Mathlib"):
-        candidate = lake_root / sub
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def search_mathlib(query: str, max_results: int = 10, path: str | None = None) -> str:
-    search_dir = None
-    project_label = "default workspace"
-
-    if path:
-        lake_root_str = _find_lake_root(path)
-        if lake_root_str:
-            mathlib = _mathlib_for_lake_root(Path(lake_root_str))
-            if mathlib:
-                search_dir = str(mathlib)
-                project_label = lake_root_str
-            else:
-                return f"Error: Mathlib not found under Lake project at {lake_root_str}. Ensure Mathlib is a Lake dependency."
-        else:
-            return f"Error: no Lake project (lakefile.lean/lakefile.toml) found above {path}."
-
-    if not search_dir:
-        for candidate in (
-            WORKSPACE / ".lake" / "packages" / "mathlib" / "Mathlib",
-            WORKSPACE / "lake-packages" / "mathlib" / "Mathlib",
-        ):
-            if candidate.exists():
-                search_dir = str(candidate)
-                break
-
-    if not search_dir:
-        return "Error: Mathlib source not found. Ensure Mathlib is a Lake dependency."
-
-    try:
-        result = subprocess.run(
-            ["grep", "-r", "-n", "--include=*.lean", "-l", query, search_dir],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        files = result.stdout.strip().split("\n")
-        files = [f for f in files if f][:max_results]
-        if not files:
-            return f"No Mathlib results for '{query}' in {project_label}."
-
-        # Get matching lines from each file
-        lines = []
-        for f in files[:max_results]:
-            grep_result = subprocess.run(
-                ["grep", "-n", query, f],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            for line in grep_result.stdout.strip().split("\n")[:2]:
-                short_path = f.split("Mathlib/")[-1] if "Mathlib/" in f else f
-                lines.append(f"  Mathlib/{short_path}:{line}")
-                if len(lines) >= max_results:
-                    break
+        for line in hit_out.strip().splitlines():
+            short = f.split("Mathlib/", 1)[-1] if "Mathlib/" in f else f
+            lines.append(f"  Mathlib/{short}:{line}")
             if len(lines) >= max_results:
                 break
+        if len(lines) >= max_results:
+            break
 
-        return f"Found {len(lines)} matches in {project_label}:\n" + "\n".join(lines)
-    except subprocess.TimeoutExpired:
-        return "Error: search timed out."
+    return f"Found {len(lines)} matches:\n" + "\n".join(lines)
 
 
-# Dispatch table
-TOOL_HANDLERS = {
-    "bash": lambda args: bash(args["command"], args.get("timeout", 120)),
-    "read_file": lambda args: read_file(args["path"], args.get("start_line"), args.get("end_line")),
-    "write_file": lambda args: write_file(args["path"], args["content"]),
-    "edit_file": lambda args: edit_file(args["path"], args["old_string"], args["new_string"]),
-    "lean_check": lambda args: lean_check(args["path"]),
-    "search_mathlib": lambda args: search_mathlib(args["query"], args.get("max_results", 10), args.get("path")),
-}
+# ----------------------------------------------------------------------------
+# Handler factory — one per agent.run() call so handlers close over their env.
+# ----------------------------------------------------------------------------
+
+def build_handlers(env: Environment) -> dict[str, Callable]:
+    return {
+        "bash":           lambda a: bash(env, a["command"], a.get("timeout", 120)),
+        "read_file":      lambda a: read_file(env, a["path"], a.get("start_line"), a.get("end_line")),
+        "write_file":     lambda a: write_file(env, a["path"], a["content"]),
+        "edit_file":      lambda a: edit_file(env, a["path"], a["old_string"], a["new_string"]),
+        "lean_check":     lambda a: lean_check(env, a["path"]),
+        "search_mathlib": lambda a: search_mathlib(env, a["query"], a.get("max_results", 10)),
+    }

@@ -113,6 +113,7 @@ def run_agent(theorem_name: str, statement: str, model: str, max_turns: int,
               proof_dir: Path, transcript_dir: Path) -> dict:
     """Run Lea on a single problem. Returns result dict."""
     from lea.agent import run
+    from lea.env.local import LocalEnvironment
 
     proof_dir.mkdir(parents=True, exist_ok=True)
     transcript_dir.mkdir(parents=True, exist_ok=True)
@@ -131,7 +132,8 @@ def run_agent(theorem_name: str, statement: str, model: str, max_turns: int,
     transcript = None
     try:
         agent_output, transcript = run(
-            task, model=model, max_turns=max_turns, return_transcript=True
+            task, model=model, max_turns=max_turns, return_transcript=True,
+            env=LocalEnvironment(str(PUTNAM_DIR)),
         )
     except Exception as e:
         agent_output = f"Agent error: {e}"

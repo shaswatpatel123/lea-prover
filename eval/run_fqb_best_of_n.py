@@ -73,6 +73,7 @@ def run_single_attempt(problem_name: str, statement: str, model: str,
                        transcript_dir: Path, attempt: int,
                        blueprint: str | None = None) -> dict:
     from lea.agent import run
+    from lea.env.local import LocalEnvironment
 
     proof_dir.mkdir(parents=True, exist_ok=True)
     transcript_dir.mkdir(parents=True, exist_ok=True)
@@ -103,7 +104,8 @@ def run_single_attempt(problem_name: str, statement: str, model: str,
     transcript = None
     try:
         agent_output, transcript = run(
-            task, model=model, max_turns=max_turns, return_transcript=True
+            task, model=model, max_turns=max_turns, return_transcript=True,
+            env=LocalEnvironment(str(FQB_DIR)),
         )
     except Exception as e:
         agent_output = f"Agent error: {e}"

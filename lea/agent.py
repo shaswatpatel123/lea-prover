@@ -5,9 +5,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .env import Environment
+from .env.local import LocalEnvironment
 from .prompt import load_system_prompt
 from .providers import stream, detect_provider, TextDelta, ToolCall, Done, _ToolMeta, Usage
-from .tools import TOOLS_SCHEMA, TOOL_HANDLERS
+from .tools import TOOLS_SCHEMA, build_handlers
 
 SESSIONS_DIR = Path.home() / ".lea" / "sessions"
 
@@ -101,12 +103,20 @@ def run(
     resume: str | bool = False,
     return_transcript: bool = False,
     prompt_variant: str = "default",
+    env: Environment | None = None,
 ) -> str | tuple[str, dict]:
     """Run the agent on a formalization task.
 
     Returns the final assistant message, or (message, transcript_dict) if
     return_transcript is True.
+
+    `env` controls where the agent's tool I/O happens. Pass a `DockerEnvironment`
+    for isolated/parallel runs; defaults to `LocalEnvironment(cwd)` so existing
+    serial scripts run as before.
     """
+    if env is None:
+        env = LocalEnvironment(str(Path.cwd()))
+    tool_handlers = build_handlers(env)
     system = load_system_prompt(prompt_variant)
 
     if resume:
@@ -212,7 +222,7 @@ def run(
         # Execute tool calls and build results
         tool_results = []
         for tc in tool_calls:
-            handler = TOOL_HANDLERS.get(tc["name"])
+            handler = tool_handlers.get(tc["name"])
             if handler:
                 try:
                     result = handler(tc["args"])
