@@ -148,6 +148,16 @@ def lean_check(path: str) -> str:
         return f"Error: {p} does not exist."
 
     lake_root = _find_lake_root(str(p))
+
+    # Fast path: persistent LSP daemon (keeps Mathlib oleans warm). ~420×
+    # speedup on in-place edits. See lea/lsp_daemon.py and tests/lsp/.
+    if lake_root and not os.environ.get("LEA_DISABLE_LSP"):
+        try:
+            from lea.lsp_daemon import check_via_lsp
+            return check_via_lsp(str(p), p.read_text(), lake_root)
+        except Exception:
+            pass  # fall through to subprocess
+
     if lake_root:
         cmd = ["lake", "env", "lean", str(p)]
         cwd = lake_root
@@ -155,16 +165,17 @@ def lean_check(path: str) -> str:
         cmd = ["lean", str(p)]
         cwd = str(p.parent)
 
+    timeout = int(os.environ.get("LEAN_CHECK_TIMEOUT", "900"))
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, cwd=cwd
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
         )
         output = (result.stdout + "\n" + result.stderr).strip()
         if result.returncode == 0 and not output:
             return "OK — no errors, no warnings."
         return output if output else f"Exit code {result.returncode} (no output)."
     except subprocess.TimeoutExpired:
-        return "Error: lean timed out after 120s."
+        return f"Error: lean timed out after {timeout}s."
     except FileNotFoundError:
         return "Error: `lean` or `lake` not found. Is Lean 4 installed?"
 
