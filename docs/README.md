@@ -6,9 +6,13 @@ the code survives beyond any single change.
 
 ## Index
 
+- [design.md](design.md) — architecture overview with flow + sequence diagrams:
+  config-in / event-out, component responsibilities, the turn lifecycle, and
+  extension points.
 - [decisions.md](decisions.md) — architecture decision log: the config-driven
   direction, agent-as-product / eval-as-consumer split, the streaming LiteLLM
-  engine, `model_kwargs`, and cost transparency — with rationale.
+  engine, `model_kwargs`, cost transparency, and the mini-swe-agent alignment —
+  with rationale.
 
 ## Conventions
 
