@@ -20,53 +20,13 @@ and the eval harnesses are all *consumers* that drive the same core.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph consumers[Consumers]
-        CLI[cli.py]
-        UI[Teammate UI]
-        EVAL[eval/ harnesses]
-    end
+> **Interactive diagram:** open **[`design.html`](design.html)** in a browser for the
+> styled architecture flow and turn-lifecycle diagrams (color-coded, no dependencies).
 
-    subgraph config[Config in]
-        DEF[(default.yaml)]
-        USER[(--config overlay)]
-        LOAD[config.load_config]
-        VAL[validation.validate_config]
-        CFG[(LeaConfig)]
-    end
-
-    subgraph core[Agent core]
-        RE[agent.run_events<br/>generator loop]
-        PROM[prompt.load_system_prompt]
-        PROV[providers.stream]
-        LL[(LiteLLM<br/>any provider)]
-        TOOLS[tools.TOOL_HANDLERS<br/>read/write/edit/lean_check/bash/search]
-    end
-
-    subgraph out[Events out]
-        EV{{typed event stream}}
-        REN[render_to_stdout]
-        UIR[UI renderer]
-        EVR[eval collector]
-    end
-
-    CLI --> LOAD
-    EVAL --> LOAD
-    DEF --> LOAD
-    USER --> LOAD
-    LOAD --> VAL --> CFG
-    UI -. validate payload .-> VAL
-
-    CFG --> RE
-    RE --> PROM
-    RE -->|stream / blocking| PROV --> LL
-    RE -->|dispatch| TOOLS
-    RE ==>|yields| EV
-    EV --> REN
-    EV --> UIR
-    EV --> EVR
-```
+In words: **Consumers** (`cli.py`, a UI, `eval/`) → **Config in** (`default.yaml` +
+`--config` → `load_config` → `validate_config` → `LeaConfig`) → **Agent core**
+(`run_events` calling `providers.stream`/LiteLLM + `TOOL_HANDLERS`) → **Events out**
+(typed event stream → `render_to_stdout` / UI / eval).
 
 Key property: **the engine swap and the streaming/blocking choice never touch the
 loop or the consumers** — `providers.stream()` always yields the same event types,
@@ -74,33 +34,14 @@ so everything to the right of it is invariant.
 
 ## Turn lifecycle
 
-One iteration of the loop, from `run_events` through a consumer:
+One iteration of the loop (see **[`design.html`](design.html)** for the visual):
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant R as run_events
-    participant P as providers.stream
-    participant L as LiteLLM
-    participant T as tool handler
-    participant C as consumer (render/UI)
-
-    R->>C: TurnStarted(turn)
-    R->>P: stream(model, msgs, tools, model_kwargs, streaming)
-    P->>L: litellm.completion(...)
-    L-->>P: chunks (stream) / one response (blocking)
-    P-->>R: TextDelta*, ToolCall(+_ToolMeta), Done(usage, cost)
-    R->>C: AssistantTextDelta*, ToolCalled*
-    R->>C: UsageUpdated(in, out, cost)   %% per-turn cost
-    alt tool calls present
-        R->>T: handler(args)
-        T-->>R: result
-        R->>C: ToolResulted(name, preview)
-        Note over R: append tool_results, persist session, next turn
-    else no tool calls
-        R->>C: Finished(text, turns, usage, cost, transcript)
-    end
-```
+1. `run_events` → consumer: **`TurnStarted(turn)`**
+2. `run_events` → `providers.stream(model, msgs, tools, model_kwargs, streaming)` → LiteLLM
+3. providers → `run_events`: **`TextDelta*`**, **`ToolCall`** (+`_ToolMeta`), **`Done(usage, cost)`**
+4. `run_events` → consumer: **`AssistantTextDelta*`**, **`ToolCalled*`**, **`UsageUpdated(in, out, cost)`** (per-turn cost)
+5. if tool calls: run each `TOOL_HANDLERS[name](args)` → **`ToolResulted`**, persist session, next turn
+6. else: **`Finished(reason, text, turns, usage, cost, transcript)`**, `reason ∈ {completed, max_turns}`
 
 The `max_turns` guard at the top of the loop short-circuits to a
 `Finished(reason="max_turns")` before streaming.
