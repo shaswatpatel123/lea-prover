@@ -3,6 +3,7 @@
 
 model:
   name: gemini/gemini-3.1-pro-preview   # LiteLLM "provider/model" identifier
+  stream: true                          # true → stream tokens live; false → one blocking call
   model_kwargs:                         # passed straight to litellm.completion(**model_kwargs)
     max_tokens: 16384                   # add temperature, reasoning_effort, etc. here as needed
 

@@ -69,8 +69,14 @@ neutral message format (convert to OpenAI shape inside `stream()`).
 
 **Why.** LiteLLM is how mini-swe-agent stays provider-agnostic. Keeping the
 contract makes the swap engine-only: `agent.py`, sessions, transcripts, and eval
-are untouched. **Streaming is required** — the UI wants live token output, so we
-parse streamed chunk deltas (unlike mini-swe-agent, which is blocking).
+are untouched.
+
+**Streaming is config-driven (`model.stream: bool`).** The UI wants live token
+output, so streaming is the default; but a consumer can set `stream: false` for a
+single blocking call (mini-swe-agent's mode). Both paths in `providers.stream()`
+yield the *same* event types (`TextDelta`/`ToolCall`/`Done`), so the agent loop
+and renderer are identical either way — blocking just emits one whole `TextDelta`.
+This turns the earlier streaming-vs-blocking divergence from mini into a setting.
 
 **Notes.**
 - Model names use LiteLLM's `provider/model` convention (`gemini/…`,

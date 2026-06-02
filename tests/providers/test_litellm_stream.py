@@ -55,17 +55,41 @@ def fake_cost_per_token(model, prompt_tokens, completion_tokens):
     return (0.001, 0.002)
 
 
+def fake_completion_blocking(**kwargs):
+    _CAPTURED.update(kwargs)
+    message = ns(
+        content="Hello world",
+        tool_calls=[ns(id="call_1", function=ns(name="lean_check", arguments='{"path": "/x.lean"}'))],
+    )
+    return ns(choices=[ns(message=message)], usage=ns(prompt_tokens=100, completion_tokens=50))
+
+
+TOOLS = [{
+    "name": "lean_check",
+    "description": "check a Lean file",
+    "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+}]
+MESSAGES = [{"role": "user", "content": "prove it"}]
+
+
+def test_blocking_mode():
+    providers.litellm.completion = fake_completion_blocking
+    providers.litellm.cost_per_token = fake_cost_per_token
+    events = list(providers.stream("gemini/test-model", "SYS", MESSAGES, TOOLS, {"max_tokens": 100}, streaming=False))
+    check("blocking: TextDelta whole content", events[0] == TextDelta("Hello world"))
+    check("blocking: ToolCall assembled", events[1] == ToolCall("lean_check", {"path": "/x.lean"}))
+    check("blocking: _ToolMeta id", events[2] == _ToolMeta("call_1"))
+    check("blocking: Done usage", isinstance(events[-1], Done) and events[-1].usage == Usage(100, 50))
+    check("blocking: Done cost", abs(events[-1].cost - 0.003) < 1e-9)
+
+
 def main():
     print("providers (LiteLLM stream) tests:")
     providers.litellm.completion = fake_completion
     providers.litellm.cost_per_token = fake_cost_per_token
 
-    tools = [{
-        "name": "lean_check",
-        "description": "check a Lean file",
-        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-    }]
-    messages = [{"role": "user", "content": "prove it"}]
+    tools = TOOLS
+    messages = MESSAGES
     events = list(providers.stream("gemini/test-model", "SYS", messages, tools, {"max_tokens": 100}))
 
     # Event sequence
@@ -90,6 +114,8 @@ def main():
     check("openai function-tool shape",
           bool(sent_tools) and sent_tools[0]["type"] == "function"
           and sent_tools[0]["function"]["name"] == "lean_check")
+
+    test_blocking_mode()
 
     print()
     if _FAILURES:

@@ -19,7 +19,7 @@ from .errors import (
 
 # Recognized keys per section. Anything outside these is an UnknownConfigKeyError.
 _TOP_KEYS = {"model", "agent"}
-_MODEL_KEYS = {"name", "model_kwargs"}
+_MODEL_KEYS = {"name", "model_kwargs", "stream"}
 _AGENT_KEYS = {"prompt_variant", "max_turns"}
 
 
@@ -29,6 +29,7 @@ class LeaConfig:
 
     model_name: str          # LiteLLM "provider/model", e.g. "gemini/gemini-3.1-pro-preview"
     model_kwargs: dict        # open passthrough to litellm.completion (temperature, max_tokens, ...)
+    stream: bool             # True → stream tokens live; False → one blocking call
     prompt_variant: str      # name of a prompt variant (no fixed allow-list)
     max_turns: int | None    # None → run until the proof is done
 
@@ -68,6 +69,13 @@ def _check_dict(section: str, key: str, value: object) -> None:
         )
 
 
+def _check_bool(section: str, key: str, value: object) -> None:
+    if not isinstance(value, bool):
+        raise InvalidConfigValueError(
+            f"'{section}.{key}' must be a boolean, got {type(value).__name__}."
+        )
+
+
 def _check_opt_int(section: str, key: str, value: object) -> None:
     # bool is a subclass of int — exclude it so `true` isn't read as 1.
     if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
@@ -94,12 +102,14 @@ def validate_config(raw: dict) -> LeaConfig:
 
     _check_str("model", "name", model["name"])
     _check_dict("model", "model_kwargs", model["model_kwargs"])
+    _check_bool("model", "stream", model["stream"])
     _check_str("agent", "prompt_variant", agent["prompt_variant"])
     _check_opt_int("agent", "max_turns", agent["max_turns"])
 
     return LeaConfig(
         model_name=model["name"],
         model_kwargs=model["model_kwargs"],
+        stream=model["stream"],
         prompt_variant=agent["prompt_variant"],
         max_turns=agent["max_turns"],
     )

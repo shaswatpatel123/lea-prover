@@ -152,7 +152,7 @@ def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
         current_text = ""
         tool_calls = []
 
-        for event in stream(model, system, messages, TOOLS_SCHEMA, config.model_kwargs):
+        for event in stream(model, system, messages, TOOLS_SCHEMA, config.model_kwargs, streaming=config.stream):
             if isinstance(event, TextDelta):
                 current_text += event.text
                 yield AssistantTextDelta(event.text)

@@ -31,7 +31,7 @@ def install_fakes():
     """Patch the agent's collaborators; returns a fresh two-turn fake stream."""
     calls = {"n": 0}
 
-    def fake_stream(model, system, messages, tools, model_kwargs):
+    def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
         calls["n"] += 1
         if calls["n"] == 1:
             yield TextDelta("Let me check. ")
@@ -49,7 +49,8 @@ def install_fakes():
 
 
 def cfg(max_turns=None):
-    return LeaConfig(model_name="gemini/test", model_kwargs={}, prompt_variant="default", max_turns=max_turns)
+    return LeaConfig(model_name="gemini/test", model_kwargs={}, stream=True,
+                     prompt_variant="default", max_turns=max_turns)
 
 
 def test_run_events_sequence():

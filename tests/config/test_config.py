@@ -44,7 +44,7 @@ def expect_raises(name: str, err_type: type, fn) -> None:
 def valid_raw() -> dict:
     """A complete, valid config mapping."""
     return {
-        "model": {"name": "test-model", "model_kwargs": {"temperature": 0.0}},
+        "model": {"name": "test-model", "stream": True, "model_kwargs": {"temperature": 0.0}},
         "agent": {"prompt_variant": "default", "max_turns": None},
     }
 
@@ -53,6 +53,7 @@ def test_defaults_match_today():
     cfg = load_config(None)
     check("defaults: model_name", cfg.model_name == "gemini/gemini-3.1-pro-preview")
     check("defaults: model_kwargs", cfg.model_kwargs == {"max_tokens": 16384})
+    check("defaults: stream is True", cfg.stream is True)
     check("defaults: prompt_variant", cfg.prompt_variant == "default")
     check("defaults: max_turns is None", cfg.max_turns is None)
 
@@ -88,6 +89,12 @@ def test_typed_errors():
 
     bad_kwargs = valid_raw(); bad_kwargs["model"]["model_kwargs"] = "lots"
     expect_raises("model_kwargs not a mapping", InvalidConfigValueError, lambda: validate_config(bad_kwargs))
+
+    missing_stream = valid_raw(); del missing_stream["model"]["stream"]
+    expect_raises("missing model.stream", MissingConfigKeyError, lambda: validate_config(missing_stream))
+
+    bad_stream = valid_raw(); bad_stream["model"]["stream"] = "yes"
+    expect_raises("stream not a bool", InvalidConfigValueError, lambda: validate_config(bad_stream))
 
     null_variant = valid_raw(); null_variant["agent"]["prompt_variant"] = None
     expect_raises("prompt_variant null", InvalidConfigValueError, lambda: validate_config(null_variant))

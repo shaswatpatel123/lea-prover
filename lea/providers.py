@@ -121,17 +121,32 @@ def _api_key_kwargs(model: str) -> dict:
     return {}
 
 
-def stream(model: str, system: str, messages: list, tools: list, model_kwargs: dict | None = None):
+def stream(model: str, system: str, messages: list, tools: list,
+           model_kwargs: dict | None = None, streaming: bool = True):
     """Yield TextDelta, ToolCall, _ToolMeta, and Done events from the model via LiteLLM.
 
     messages: Lea's neutral format ({"role", "content": str | list of blocks}).
     tools: Lea tool schema dicts (name, description, input_schema); [] for none.
     model_kwargs: passthrough to litellm.completion (temperature, max_tokens, ...).
+    streaming: True → stream tokens live; False → one blocking call. Both modes
+        yield the same event types, so the agent loop is identical either way.
     """
     model_kwargs = model_kwargs or {}
-    openai_tools = _to_openai_tools(tools)
-    openai_messages = _to_openai_messages(system, messages)
+    call = dict(
+        model=model,
+        messages=_to_openai_messages(system, messages),
+        tools=_to_openai_tools(tools) or None,
+        **_api_key_kwargs(model),
+        **model_kwargs,
+    )
+    if streaming:
+        yield from _stream_streaming(model, call)
+    else:
+        yield from _stream_blocking(model, call)
 
+
+def _stream_streaming(model: str, call: dict):
+    """Streaming path: parse chunk deltas into events as they arrive."""
     usage = Usage()
     tool_calls_acc: dict[int, dict] = {}  # index -> {id, name, args_json}
 
@@ -143,16 +158,7 @@ def stream(model: str, system: str, messages: list, tools: list, model_kwargs: d
             yield _ToolMeta(tc["id"])
         tool_calls_acc.clear()
 
-    response = litellm.completion(
-        model=model,
-        messages=openai_messages,
-        tools=openai_tools or None,
-        stream=True,
-        stream_options={"include_usage": True},
-        **_api_key_kwargs(model),
-        **model_kwargs,
-    )
-
+    response = litellm.completion(stream=True, stream_options={"include_usage": True}, **call)
     for chunk in response:
         if getattr(chunk, "usage", None):
             usage.input_tokens = chunk.usage.prompt_tokens or 0
@@ -182,5 +188,22 @@ def stream(model: str, system: str, messages: list, tools: list, model_kwargs: d
 
     # Flush any tool calls a provider left without a "tool_calls" finish_reason.
     yield from flush_tool_calls()
+    yield Done(usage, _compute_cost(model, usage))
 
+
+def _stream_blocking(model: str, call: dict):
+    """Blocking path: one completion call, emitted as the same event types."""
+    response = litellm.completion(**call)
+    message = response.choices[0].message
+
+    if getattr(message, "content", None):
+        yield TextDelta(message.content)
+
+    for tc in (getattr(message, "tool_calls", None) or []):
+        args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+        yield ToolCall(tc.function.name, args)
+        yield _ToolMeta(tc.id)
+
+    u = getattr(response, "usage", None)
+    usage = Usage(getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0) if u else Usage()
     yield Done(usage, _compute_cost(model, usage))
