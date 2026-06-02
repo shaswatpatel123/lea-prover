@@ -112,6 +112,45 @@ cost gives the UI/users live spend transparency.
 
 ---
 
+## mini-swe-agent alignment
+
+Every decision mapped against mini-swe-agent (the config-driven agent we modeled
+on), marked where Lea follows it vs. diverges and why.
+
+**Followed (same as mini):**
+- Config-driven design with a minimal core loop.
+- Agent = product; benchmarks/UI = consumers (module boundary, not branches).
+- Engine = LiteLLM.
+- `provider/model` naming; no provider-guessing.
+- Open `model_kwargs` dict splatted into `litellm.completion`.
+- Cost from LiteLLM (`completion_cost`/`cost_per_token`) + graceful fallback.
+
+**Diverged (with reason):**
+- **Typed event stream.** mini is blocking and has no event stream; Lea yields a
+  typed event stream so the UI can render live. (Streaming itself is now a config
+  toggle — see decision 6 — so mini's *blocking* mode is available too; the typed
+  *contract* is the genuine, deliberate addition.)
+- **No hardcoded defaults.** mini uses pydantic field defaults; Lea makes
+  `default.yaml` the sole source (`LeaConfig` has no defaults).
+- **Validation.** mini uses pydantic + "don't catch exceptions"; Lea hand-rolls an
+  I/O-free `validate_config` + typed `ConfigError` hierarchy so the UI/API can
+  validate a payload with precise, pinpointing errors.
+- **Per-turn cost surfaced live.** mini records cost in message metadata; Lea emits
+  per-turn cost as an event + CLI line for transparency.
+
+**Pre-existing Lea ≠ mini (predate this work):**
+- **Tools.** mini's default is text-based (bash in fenced code blocks, no tool API);
+  Lea uses the native tool-calling API with six tools.
+- **Message format.** mini stores OpenAI-format messages natively; Lea keeps a
+  neutral format and converts to OpenAI shape inside `stream()` (to preserve the
+  contract while streaming).
+
+**A mini feature we deferred:**
+- Pluggable `model_class` registry (`litellm`/`litellm_textbased`/`portkey`/…).
+  Not needed while LiteLLM is the only backend.
+
+---
+
 ## Deferred (not yet decided / built)
 
 Pluggable tool registry, custom tools, MCP; skills (procedural-knowledge prompt
