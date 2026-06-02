@@ -1,0 +1,12 @@
+# Lea default configuration — the single source of truth for default behavior.
+# Always loaded as the base; a user `--config FILE` overlays on top of it.
+
+model:
+  name: gemini/gemini-3.1-pro-preview   # LiteLLM "provider/model" identifier
+  stream: true                          # true → stream tokens live; false → one blocking call
+  model_kwargs:                         # passed straight to litellm.completion(**model_kwargs)
+    max_tokens: 16384                   # add temperature, reasoning_effort, etc. here as needed
+
+agent:
+  prompt_variant: default               # which system-prompt variant to load
+  max_turns: null                       # null → run until the proof is done

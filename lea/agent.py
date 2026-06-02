@@ -1,35 +1,33 @@
-"""Lea agent — the core loop. Model calls tools until done."""
+"""Lea agent — the core loop. Model calls tools until done.
+
+`run_events()` is the generator core: it yields a typed event stream and never
+prints. `run()` is a backward-compatible wrapper that drains those events through
+the default stdout renderer and returns the final text (and optional transcript),
+so existing callers (CLI, eval) keep working unchanged.
+"""
 
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .config import LeaConfig, load_config
 from .prompt import load_system_prompt
-from .providers import stream, detect_provider, TextDelta, ToolCall, Done, _ToolMeta, Usage
+from .providers import stream, TextDelta, ToolCall, Done, _ToolMeta, Usage
 from .tools import TOOLS_SCHEMA, TOOL_HANDLERS
+from .events import (
+    SessionResumed,
+    TurnStarted,
+    AssistantTextDelta,
+    ToolCalled,
+    ToolResulted,
+    UsageUpdated,
+    Finished,
+)
+from .render import render_to_stdout
 
 SESSIONS_DIR = Path.home() / ".lea" / "sessions"
 
-DEFAULT_MODEL = "gemini-3.1-pro-preview"
-
-# Per-million-token pricing (input, output). Best-effort estimates.
-MODEL_PRICING = {
-    "gemini-2.5-pro": (1.25, 10.0),
-    "gemini-2.5-flash": (0.15, 0.60),
-    "gemini-3-pro-preview": (1.25, 10.0),
-    "gemini-3.1-pro-preview": (1.25, 10.0),
-    "claude-sonnet-4-20250514": (3.0, 15.0),
-    "claude-opus-4-20250514": (15.0, 75.0),
-    "claude-sonnet-4-6": (3.0, 15.0),
-    "claude-opus-4-7": (15.0, 75.0),
-    "claude-haiku-4-5-20251001": (1.0, 5.0),
-    "gpt-4o": (2.50, 10.0),
-    "gpt-5.4-pro-2026-03-05": (2.5, 15.0),
-    "o3": (2.0, 8.0),
-    "o4-mini": (1.10, 4.40),
-}
-DEFAULT_PRICING = (2.0, 10.0)
+_UNSET = object()  # sentinel: distinguishes "caller omitted arg" from an explicit None
 
 
 def _save_session(session_id: str, model: str, messages: list, usage: Usage):
@@ -93,25 +91,17 @@ def list_sessions() -> list[dict]:
     return summaries
 
 
-def run(
-    task: str,
-    model: str = DEFAULT_MODEL,
-    max_turns: int | None = None,
-    provider: str | None = None,
-    resume: str | bool = False,
-    return_transcript: bool = False,
-    prompt_variant: str = "default",
-) -> str | tuple[str, dict]:
-    """Run the agent on a formalization task.
+def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
+    """Core loop as a generator: yields typed events, never prints.
 
-    Returns the final assistant message, or (message, transcript_dict) if
-    return_transcript is True.
+    Yields SessionResumed?, then per turn: TurnStarted, AssistantTextDelta*,
+    ToolCalled*, UsageUpdated, ToolResulted*, and finally Finished.
     """
-    system = load_system_prompt(prompt_variant)
+    system = load_system_prompt(config.prompt_variant)
+    model = config.model_name
 
     if resume:
-        session_id_to_load = resume if isinstance(resume, str) else None
-        session = _load_session(session_id_to_load)
+        session = _load_session(resume if isinstance(resume, str) else None)
         messages = session["messages"]
         model = session.get("model", model)
         session_id = session["id"]
@@ -119,77 +109,70 @@ def run(
             session.get("usage", {}).get("input_tokens", 0),
             session.get("usage", {}).get("output_tokens", 0),
         )
-        # Append the new task as a follow-up message
         if task:
             messages.append({"role": "user", "content": task})
-        print(f"Resuming session {session_id} ({len(messages)} messages)", flush=True)
+        yield SessionResumed(session_id, len(messages))
     else:
         session_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         messages = [{"role": "user", "content": task}]
         total_usage = Usage()
 
-    provider_name = provider or detect_provider(model)
+    total_cost = 0.0
 
-    def _result(text: str, turns: int):
-        if return_transcript:
-            # Build a clean transcript (no raw_part)
-            clean = []
-            for msg in messages:
-                if msg["role"] == "assistant" and isinstance(msg["content"], list):
-                    clean.append({"role": "assistant", "content": [
-                        {k: v for k, v in item.items() if k != "raw_part"}
-                        for item in msg["content"]
-                    ]})
-                else:
-                    clean.append(msg)
-            transcript = {
-                "session_id": session_id,
-                "model": model,
-                "turns": turns,
-                "usage": {"input_tokens": total_usage.input_tokens, "output_tokens": total_usage.output_tokens},
-                "messages": clean,
-            }
-            return text, transcript
-        return text
+    def transcript(turns: int) -> dict:
+        clean = []
+        for msg in messages:
+            if msg["role"] == "assistant" and isinstance(msg["content"], list):
+                clean.append({"role": "assistant", "content": [
+                    {k: v for k, v in item.items() if k != "raw_part"}
+                    for item in msg["content"]
+                ]})
+            else:
+                clean.append(msg)
+        return {
+            "session_id": session_id,
+            "model": model,
+            "turns": turns,
+            "usage": {"input_tokens": total_usage.input_tokens, "output_tokens": total_usage.output_tokens},
+            "messages": clean,
+        }
 
     turn = 0
     while True:
         turn += 1
-        if max_turns and turn > max_turns:
+        if config.max_turns and turn > config.max_turns:
             _save_session(session_id, model, messages, total_usage)
-            _print_usage(model, turn - 1, total_usage)
-            return _result("Error: max turns reached without completing the proof.", turn - 1)
+            yield Finished("max_turns", "Error: max turns reached without completing the proof.",
+                           turn - 1, session_id, model, total_usage, total_cost, transcript(turn - 1))
+            return
 
-        print(f"\n--- turn {turn} ---", flush=True)
+        yield TurnStarted(turn)
 
-        # Collect events from the stream
-        assistant_parts = []  # list of {"type": "text"/"tool_call", ...}
+        assistant_parts = []
         current_text = ""
-        tool_calls = []  # list of (name, args, id_or_none)
+        tool_calls = []
 
-        for event in stream(model, system, messages, TOOLS_SCHEMA, provider_name):
+        for event in stream(model, system, messages, TOOLS_SCHEMA, config.model_kwargs, streaming=config.stream):
             if isinstance(event, TextDelta):
-                sys.stdout.write(event.text)
-                sys.stdout.flush()
                 current_text += event.text
+                yield AssistantTextDelta(event.text)
             elif isinstance(event, ToolCall):
                 if current_text:
                     assistant_parts.append({"type": "text", "text": current_text})
                     current_text = ""
-                print(f"\n  -> {event.name}({event.args})", flush=True)
+                yield ToolCalled(event.name, event.args)
                 tool_calls.append({"name": event.name, "args": event.args, "id": None, "raw_part": event.raw_part})
             elif isinstance(event, _ToolMeta):
-                # Attach the provider-specific ID to the last tool call
                 if tool_calls:
                     tool_calls[-1]["id"] = event.tool_use_id
             elif isinstance(event, Done):
                 total_usage.input_tokens += event.usage.input_tokens
                 total_usage.output_tokens += event.usage.output_tokens
+                total_cost += event.cost
+                yield UsageUpdated(event.usage.input_tokens, event.usage.output_tokens, event.cost)
 
         if current_text:
             assistant_parts.append({"type": "text", "text": current_text})
-
-        # Build assistant content with tool calls
         for tc in tool_calls:
             assistant_parts.append({
                 "type": "tool_call",
@@ -198,18 +181,15 @@ def run(
                 "id": tc["id"],
                 "raw_part": tc.get("raw_part"),
             })
-
         messages.append({"role": "assistant", "content": assistant_parts})
 
-        # If no tool calls, we're done
         if not tool_calls:
-            print()
             _save_session(session_id, model, messages, total_usage)
-            _print_usage(model, turn, total_usage)
             text = "".join(p["text"] for p in assistant_parts if p["type"] == "text")
-            return _result(text or "(no response)", turn)
+            yield Finished("completed", text or "(no response)", turn, session_id, model,
+                           total_usage, total_cost, transcript(turn))
+            return
 
-        # Execute tool calls and build results
         tool_results = []
         for tc in tool_calls:
             handler = TOOL_HANDLERS.get(tc["name"])
@@ -222,10 +202,9 @@ def run(
                 result = f"Error: unknown tool '{tc['name']}'"
 
             preview = result[:200] + "..." if len(result) > 200 else result
-            print(f"  <- {preview}", flush=True)
+            yield ToolResulted(tc["name"], result, preview)
 
             tool_result = {"type": "tool_result", "tool_name": tc["name"], "content": result}
-            # Attach provider-specific IDs for message reconstruction
             if tc["id"]:
                 tool_result["tool_use_id"] = tc["id"]
                 tool_result["tool_call_id"] = tc["id"]
@@ -235,9 +214,28 @@ def run(
         _save_session(session_id, model, messages, total_usage)
 
 
-def _print_usage(model: str, turns: int, usage: Usage):
-    """Print a summary line with token counts and estimated cost."""
-    price_in, price_out = MODEL_PRICING.get(model, DEFAULT_PRICING)
-    cost = (usage.input_tokens * price_in + usage.output_tokens * price_out) / 1_000_000
-    total = usage.input_tokens + usage.output_tokens
-    print(f"\n--- {turns} turns, {total:,} tokens (in: {usage.input_tokens:,}, out: {usage.output_tokens:,}), ~${cost:.4f} ---", flush=True)
+def run(
+    task: str,
+    model: str | None = None,
+    max_turns=_UNSET,
+    provider: str | None = None,  # accepted for back-compat; LiteLLM routes by model name
+    resume: str | bool = False,
+    return_transcript: bool = False,
+    prompt_variant: str | None = None,
+) -> str | tuple[str, dict]:
+    """Backward-compatible wrapper: run the agent and render to stdout.
+
+    Builds a LeaConfig from defaults + any explicit overrides, drains the event
+    stream through the default renderer, and returns the final text (and the
+    transcript dict if return_transcript is True).
+    """
+    config = load_config(None)
+    if model is not None:
+        config.model_name = model
+    if prompt_variant is not None:
+        config.prompt_variant = prompt_variant
+    if max_turns is not _UNSET:
+        config.max_turns = max_turns
+
+    text, transcript = render_to_stdout(run_events(config, task or "", resume=resume))
+    return (text, transcript) if return_transcript else text
