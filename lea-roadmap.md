@@ -233,6 +233,76 @@ window should be enough; flag if not):
 old tool-result blocks with one-line summaries. ~50 LoC. Deferred —
 1M context probably makes this unnecessary for RegLip-scale projects.
 
+### Phase 6 — Cross-attempt knowledge sharing (ideas from AlphaProof Nexus)
+
+Source: Tsoukalas et al., *Advancing Mathematics Research with AI-Driven
+Formal Proof Search*, arXiv:2605.22763v1 (DeepMind, May 2026). Their
+agent autonomously resolved 9 Erdős problems via a Lean-grounded
+Ralph-loop architecture closely resembling Lea's. The most useful
+finding for Lea is the *negative* one: their Agent A (basic loop, no
+critics, no evolutionary search) solved all 9 problems on its own;
+the sophisticated Agent D only dominated on the two hardest instances
+with a 2–5× cost saving. That validates Lea's current design, but two
+of their cheaper mechanisms are worth borrowing.
+
+**Architectural note on the dispatcher.** The multi-node orchestrator
+lives at `lea-frontier/tools/dispatcher.py` (~520 LoC), not in
+lea-prover. That split is intentional — lea-prover is a single-loop
+agent; lea-frontier dispatches it across blueprint nodes. The cache
+and lesson-log infrastructure below naturally lives on the dispatcher
+side (lea-frontier), with lea-prover gaining minimal hooks to consume
+the data via prompt injection. Phase 4's `eval/run_project.py` is the
+lea-prover-internal counterpart for evals.
+
+**6.1 Global goal cache.** When a `have` subgoal closes in any
+dispatcher run, store `(normalized_goal_hash → proof_term)` in
+`<lake_root>/.lea/goal-cache.json`. On subsequent dispatches the
+dispatcher pre-loads relevant cache hits into the prompt as
+"known-working proofs for related subgoals." Direct port of the
+paper's global goal cache.
+
+Pi-compatible: a single JSON file. Dispatcher reads/writes;
+lea-prover consumes via system-prompt injection.
+
+Effort: ~150 LoC in `lea-frontier/tools/dispatcher.py`, ~20 LoC in
+lea-prover `prompt.py`.
+
+Highest-leverage target: lea-hadamard (27 theorems sharing a
+blueprint = 27 chances to reuse common Mathlib lemma applications).
+RegLip-style projects benefit less because each node's proof structure
+diverges quickly, but baseline Mathlib invocations (`exact?`-style
+chains, `omega`-amenable goals) would still hit.
+
+**6.2 Structured lesson log per project.** The paper has agents
+accumulate one-line "what worked / what didn't" lessons inside the
+proof file as comments, surviving across attempts. Formalize as: at
+end of each dispatch, the agent appends a one-paragraph lesson to
+`<lake_root>/.lea/lessons.md`. The dispatcher injects the log into the
+next dispatch's prompt.
+
+Fold into Phase 1.2's `notes.md` if implemented; otherwise ~10 LoC
+standalone. Same Pi-compatibility justification — it's a markdown file.
+
+**6.3 Cheap-model critic step (DEFERRED — conflicts with retired
+decision).** The paper's Agent D uses a cheaper model (Gemini 3.0
+Flash) to rate candidate proof sketches via Plackett-Luce / Elo
+before paying the strong model to elaborate. In Lea terms: rank N
+candidate sketches with Haiku 4.5 before Opus 4.7 fills them in.
+
+**Why deferred:** the multi-candidate generation pattern was retired
+with evidence (CLAUDE.md design decision 4, "2-3 candidates protocol";
+hurt easy problems by ~2× turn count). A critic step requires
+multi-candidate generation as a prerequisite, so adopting it
+relitigates that decision. The paper's own data agrees with the
+retirement: critics only help on the hardest instances (Erdős #125,
+#138); easier problems are net negative.
+
+Conditional revisit: only if Phase 4's frontier-scale eval shows Lea
+plateauing on specific hard nodes where multiple plausible strategies
+exist but selection is unclear. In that case, a *single Haiku-rated
+binary choice* (continue vs. axiomatize? hand-write vs. re-dispatch?)
+might be worth piloting — not the full Plackett-Luce / Elo machinery.
+
 ## Budget summary
 
 | Phase | LoC | Effort | Outcome |
@@ -243,10 +313,13 @@ old tool-result blocks with one-line summaries. ~50 LoC. Deferred —
 | 3 | 0 (prompt only) | half day | Forced decomposition; revives premise-search value |
 | 4 | ~100 | 1–2 days | Hard numbers on "RegLip-scale" capability |
 | 5 | ~50 | 1 day | (Only if 1M context isn't enough) |
+| 6.1 | ~170 (across two repos) | 1–2 days | Goal cache; biggest payoff on lea-hadamard |
+| 6.2 | ~10 | half day | Lesson log; rolls into Phase 1.2 if landed first |
+| 6.3 | — | — | Deferred (conflicts with retired decision 4) |
 
 Total committed (Phases 0–4): **~430 LoC, ~5–8 days**. Roughly +33% to
 Lea's current 1300-LoC codebase. Stays well under "orchestration layer"
-thresholds.
+thresholds. Phase 6.1–6.2 add another ~180 LoC if landed.
 
 ## Predicted outcomes
 
