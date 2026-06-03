@@ -20,7 +20,9 @@ from .errors import (
 # Recognized keys per section. Anything outside these is an UnknownConfigKeyError.
 _TOP_KEYS = {"model", "agent"}
 _MODEL_KEYS = {"name", "model_kwargs", "stream"}
-_AGENT_KEYS = {"prompt_variant", "max_turns"}
+_AGENT_KEYS = {"prompt_variant", "max_turns", "tools", "tool_modules"}
+# Keys that must be present (others are optional and may be omitted/null).
+_AGENT_REQUIRED = {"prompt_variant", "max_turns"}
 
 
 @dataclass
@@ -32,6 +34,8 @@ class LeaConfig:
     stream: bool             # True → stream tokens live; False → one blocking call
     prompt_variant: str      # name of a prompt variant (no fixed allow-list)
     max_turns: int | None    # None → run until the proof is done
+    tools: list[str] | None  # tool allowlist (order = call order); None → all registered tools
+    tool_modules: list[str]  # python modules to import so custom tools register
 
 
 def _reject_unknown(section: str, got: dict, allowed: set[str]) -> None:
@@ -84,6 +88,15 @@ def _check_opt_int(section: str, key: str, value: object) -> None:
         )
 
 
+def _check_opt_str_list(section: str, key: str, value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise InvalidConfigValueError(
+            f"'{section}.{key}' must be a list of strings or null, got {type(value).__name__}."
+        )
+
+
 def validate_config(raw: dict) -> LeaConfig:
     """Validate a parsed config mapping and return a LeaConfig (raises on first error)."""
     if not isinstance(raw, dict):
@@ -97,7 +110,7 @@ def validate_config(raw: dict) -> LeaConfig:
 
     for key in _MODEL_KEYS:
         _require("model", model, key)
-    for key in _AGENT_KEYS:
+    for key in _AGENT_REQUIRED:
         _require("agent", agent, key)
 
     _check_str("model", "name", model["name"])
@@ -106,10 +119,19 @@ def validate_config(raw: dict) -> LeaConfig:
     _check_str("agent", "prompt_variant", agent["prompt_variant"])
     _check_opt_int("agent", "max_turns", agent["max_turns"])
 
+    # Optional tool keys: omitted/null tools → all registered tools; omitted
+    # tool_modules → no custom modules.
+    tools = agent.get("tools")
+    tool_modules = agent.get("tool_modules")
+    _check_opt_str_list("agent", "tools", tools)
+    _check_opt_str_list("agent", "tool_modules", tool_modules)
+
     return LeaConfig(
         model_name=model["name"],
         model_kwargs=model["model_kwargs"],
         stream=model["stream"],
         prompt_variant=agent["prompt_variant"],
         max_turns=agent["max_turns"],
+        tools=tools,
+        tool_modules=tool_modules or [],
     )

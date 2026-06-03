@@ -13,6 +13,7 @@ from contextlib import redirect_stdout
 
 import lea.agent as agent
 from lea.config import LeaConfig
+from lea.registry import REGISTRY, Tool, register
 from lea.providers import TextDelta, ToolCall, Done, _ToolMeta, Usage
 from lea.events import (
     TurnStarted, AssistantTextDelta, ToolCalled, ToolResulted, UsageUpdated, Finished,
@@ -43,14 +44,22 @@ def install_fakes():
             yield Done(Usage(20, 10), 0.001)
 
     agent.stream = fake_stream
-    agent.TOOL_HANDLERS = {"echo": lambda a: "echoed:" + str(a)}
+    # The loop dispatches through the registry now, so register a real "echo"
+    # tool (guarded — install_fakes runs per test) instead of patching a global.
+    if "echo" not in REGISTRY:
+        register(Tool(
+            name="echo",
+            schema={"name": "echo", "description": "echo args", "input_schema": {"type": "object"}},
+            handler=lambda a: "echoed:" + str(a),
+        ))
     agent._save_session = lambda *a, **k: None
     agent.load_system_prompt = lambda variant: "SYS"
 
 
-def cfg(max_turns=None):
+def cfg(max_turns=None, tools=None):
     return LeaConfig(model_name="gemini/test", model_kwargs={}, stream=True,
-                     prompt_variant="default", max_turns=max_turns)
+                     prompt_variant="default", max_turns=max_turns,
+                     tools=tools, tool_modules=[])
 
 
 def test_run_events_sequence():

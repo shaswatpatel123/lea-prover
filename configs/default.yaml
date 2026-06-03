@@ -10,3 +10,7 @@ model:
 agent:
   prompt_variant: default               # which system-prompt variant to load
   max_turns: null                       # null → run until the proof is done
+  tools: null                           # null → all registered tools; or list names to allow + order them
+                                        #   e.g. [read_file, write_file, edit_file, lean_check, search_mathlib]  (drops bash)
+  tool_modules: []                      # python modules to import so their custom tools register
+                                        #   e.g. [my_pkg.lea_tools]

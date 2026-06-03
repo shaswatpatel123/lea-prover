@@ -13,7 +13,8 @@ from pathlib import Path
 from .config import LeaConfig, load_config
 from .prompt import load_system_prompt
 from .providers import stream, TextDelta, ToolCall, Done, _ToolMeta, Usage
-from .tools import TOOLS_SCHEMA, TOOL_HANDLERS
+from . import tools as _tools  # noqa: F401 — importing registers the built-in tools
+from .registry import build_toolset, import_tool_modules
 from .events import (
     SessionResumed,
     TurnStarted,
@@ -100,6 +101,11 @@ def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
     system = load_system_prompt(config.prompt_variant)
     model = config.model_name
 
+    # Resolve the active toolset once: import any user tool modules so their
+    # tools register, then select per config (None → all registered tools).
+    import_tool_modules(config.tool_modules)
+    tools_schema, tool_handlers = build_toolset(config.tools)
+
     if resume:
         session = _load_session(resume if isinstance(resume, str) else None)
         messages = session["messages"]
@@ -152,7 +158,7 @@ def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
         current_text = ""
         tool_calls = []
 
-        for event in stream(model, system, messages, TOOLS_SCHEMA, config.model_kwargs, streaming=config.stream):
+        for event in stream(model, system, messages, tools_schema, config.model_kwargs, streaming=config.stream):
             if isinstance(event, TextDelta):
                 current_text += event.text
                 yield AssistantTextDelta(event.text)
@@ -192,7 +198,7 @@ def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
 
         tool_results = []
         for tc in tool_calls:
-            handler = TOOL_HANDLERS.get(tc["name"])
+            handler = tool_handlers.get(tc["name"])
             if handler:
                 try:
                     result = handler(tc["args"])
