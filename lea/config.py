@@ -28,7 +28,7 @@ def _read_yaml(path: Path) -> dict:
 def _merge(base: dict, user: dict) -> dict:
     """Overlay `user` on `base`: shallow at top level, one level deep for sections."""
     merged = {**base, **user}
-    for section in ("model", "agent"):
+    for section in ("model", "agent", "mcp"):
         if isinstance(base.get(section), dict) and isinstance(user.get(section), dict):
             merged[section] = {**base[section], **user[section]}
     return merged

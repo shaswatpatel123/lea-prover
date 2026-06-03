@@ -59,7 +59,7 @@ def install_fakes():
 def cfg(max_turns=None, tools=None, skills=None):
     return LeaConfig(model_name="gemini/test", model_kwargs={}, stream=True,
                      prompt_variant="default", max_turns=max_turns,
-                     tools=tools, tool_modules=[], skills=skills or [])
+                     tools=tools, tool_modules=[], skills=skills or [], mcp_servers={})
 
 
 def test_run_events_sequence():

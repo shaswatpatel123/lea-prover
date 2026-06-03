@@ -38,3 +38,9 @@ class ToolError(LeaError):
 
 class SkillError(LeaError):
     """A skill problem: a skill file named in `agent.skills` is missing or unreadable."""
+
+
+class McpError(LeaError):
+    """An MCP runtime problem: a session is unavailable or a tool call failed at
+    the protocol level. (A server that fails to *start* is warned-and-skipped, not
+    raised — see lea/mcp.py.)"""

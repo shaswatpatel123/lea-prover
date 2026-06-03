@@ -18,11 +18,14 @@ from .errors import (
 )
 
 # Recognized keys per section. Anything outside these is an UnknownConfigKeyError.
-_TOP_KEYS = {"model", "agent"}
+_TOP_KEYS = {"model", "agent", "mcp"}
 _MODEL_KEYS = {"name", "model_kwargs", "stream"}
 _AGENT_KEYS = {"prompt_variant", "max_turns", "tools", "tool_modules", "skills"}
 # Keys that must be present (others are optional and may be omitted/null).
 _AGENT_REQUIRED = {"prompt_variant", "max_turns"}
+_MCP_KEYS = {"servers"}
+_MCP_STDIO_KEYS = {"command", "args", "env", "cwd"}   # subprocess transport
+_MCP_HTTP_KEYS = {"url", "headers", "transport"}       # remote transport (http/sse)
 
 
 @dataclass
@@ -37,6 +40,7 @@ class LeaConfig:
     tools: list[str] | None  # tool allowlist (order = call order); None → all registered tools
     tool_modules: list[str]  # python modules to import so custom tools register
     skills: list[str]        # skill markdown files to inject into the system prompt, in order
+    mcp_servers: dict        # name → server spec (stdio: command/args/env/cwd, or remote: url/headers/transport)
 
 
 def _reject_unknown(section: str, got: dict, allowed: set[str]) -> None:
@@ -98,6 +102,46 @@ def _check_opt_str_list(section: str, key: str, value: object) -> None:
         )
 
 
+def _validate_mcp(raw: dict) -> dict:
+    """Validate the optional `mcp` section and return its server map (or {})."""
+    mcp = _section(raw, "mcp")
+    if not mcp:
+        return {}
+    _reject_unknown("mcp", mcp, _MCP_KEYS)
+    servers = mcp.get("servers") or {}
+    if not isinstance(servers, dict):
+        raise ConfigFormatError(f"'mcp.servers' must be a mapping, got {type(servers).__name__}.")
+
+    for name, spec in servers.items():
+        where = f"mcp.servers.{name}"
+        if not isinstance(spec, dict):
+            raise ConfigFormatError(f"'{where}' must be a mapping, got {type(spec).__name__}.")
+        has_cmd, has_url = "command" in spec, "url" in spec
+        if has_cmd == has_url:  # neither, or both
+            raise InvalidConfigValueError(
+                f"'{where}' must have exactly one of 'command' (stdio) or 'url' (remote)."
+            )
+        if has_cmd:
+            _reject_unknown(where, spec, _MCP_STDIO_KEYS)
+            _check_str(where, "command", spec["command"])
+            _check_opt_str_list(where, "args", spec.get("args"))
+            if spec.get("env") is not None:
+                _check_dict(where, "env", spec["env"])
+            if spec.get("cwd") is not None:
+                _check_str(where, "cwd", spec["cwd"])
+        else:
+            _reject_unknown(where, spec, _MCP_HTTP_KEYS)
+            _check_str(where, "url", spec["url"])
+            if spec.get("headers") is not None:
+                _check_dict(where, "headers", spec["headers"])
+            transport = spec.get("transport")
+            if transport is not None and transport not in ("http", "sse"):
+                raise InvalidConfigValueError(
+                    f"'{where}.transport' must be 'http' or 'sse', got {transport!r}."
+                )
+    return servers
+
+
 def validate_config(raw: dict) -> LeaConfig:
     """Validate a parsed config mapping and return a LeaConfig (raises on first error)."""
     if not isinstance(raw, dict):
@@ -108,6 +152,7 @@ def validate_config(raw: dict) -> LeaConfig:
     agent = _section(raw, "agent")
     _reject_unknown("model", model, _MODEL_KEYS)
     _reject_unknown("agent", agent, _AGENT_KEYS)
+    mcp_servers = _validate_mcp(raw)
 
     for key in _MODEL_KEYS:
         _require("model", model, key)
@@ -138,4 +183,5 @@ def validate_config(raw: dict) -> LeaConfig:
         tools=tools,
         tool_modules=tool_modules or [],
         skills=skills or [],
+        mcp_servers=mcp_servers,
     )

@@ -97,7 +97,24 @@ def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
 
     Yields SessionResumed?, then per turn: TurnStarted, AssistantTextDelta*,
     ToolCalled*, UsageUpdated, ToolResulted*, and finally Finished.
+
+    Owns MCP lifecycle: starts configured servers (which register their tools)
+    before the inner loop resolves the toolset, and stops them when the event
+    stream ends or is closed.
     """
+    mcp_manager = None
+    if config.mcp_servers:
+        from .mcp import MCPManager
+        mcp_manager = MCPManager(config.mcp_servers)
+        mcp_manager.start()
+    try:
+        yield from _run_events_inner(config, task, resume=resume)
+    finally:
+        if mcp_manager is not None:
+            mcp_manager.stop()
+
+
+def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = False):
     system = load_system_prompt(config.prompt_variant, config.skills)
     model = config.model_name
 

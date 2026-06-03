@@ -52,6 +52,17 @@ def register(tool: Tool) -> Tool:
     return tool
 
 
+def unregister(name: str) -> None:
+    """Remove a tool from the registry (no-op if absent).
+
+    Used to tear down dynamically-registered tools (e.g. MCP tools when their
+    manager stops) so a later run can re-register them without a duplicate clash.
+    """
+    REGISTRY.pop(name, None)
+    if name in _ORDER:
+        _ORDER.remove(name)
+
+
 def tool(*, name: str, description: str, input_schema: dict):
     """Decorator: register a `dict[args] -> str` function as a Tool.
 

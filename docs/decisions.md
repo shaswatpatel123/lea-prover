@@ -158,6 +158,47 @@ touching code or the prompt source, mirroring the tools allowlist (decision 9):
 explicit, ordered, validated, no magic. No registry — skills are just text, so a
 file list is the natural unit (unlike tools, which need handlers).
 
+## 11. MCP servers register tools into the same registry
+
+**Decision.** Add an `mcp.servers` config section (Claude-Desktop `mcpServers`
+style). At run start, `MCPManager` connects to each server, lists its tools, and
+registers each into the shared registry — after which they are ordinary tools to
+the loop, governed by the same `agent.tools` allowlist. `agent.run_events` owns
+the lifecycle: it starts the manager (so MCP tools are registered *before*
+`build_toolset`) and stops it in a `finally`.
+
+**Naming: bare, prefix only on collision.** MCP tools register under their *real*
+name (`lean_run_code`), matching Claude Desktop/Cursor and how models are trained
+to call MCP tools. Only when a name is already taken (a built-in or another
+server) do we prefix the clashing one with `<server>__`; the handler still calls
+the real tool name on the server. This was changed after a live test against
+`lean-lsp-mcp`: with always-`<server>__<tool>` naming, the model wasted 5 turns
+calling the bare `lean_run_code` (getting "unknown tool") before using the
+prefixed name — clear evidence that always-prefixing fights the model.
+
+Sub-decisions (user-chosen): **both transports** — stdio (subprocess `command`)
+and remote (`url`, streamable HTTP default or `transport: sse`); `mcp` is a
+**core dependency** (not an optional extra); a server that fails to start is
+**warned-and-skipped**, not fatal (robust for the agent-as-product use; the run
+continues with the remaining tools).
+
+Implementation note (mechanism): MCP's SDK is asyncio + anyio, whose client
+contexts must be entered and exited in the *same* task. So the manager runs one
+long-lived `_serve` coroutine on a private event loop in a background thread: it
+opens every session, signals ready, then parks on a stop event holding the
+contexts open; tool calls are dispatched onto that loop via
+`run_coroutine_threadsafe`, presenting the loop with plain `dict -> str` handlers.
+This mirrors the warm-persistent-process pattern of `lsp_daemon.py` (avoids a
+per-call server respawn) and keeps the sync agent loop untouched. A new
+`unregister()` on the registry lets the manager tear its tools down on stop so a
+later run re-registers cleanly.
+
+**Why.** Third and last of the extension points (tools / skills / **MCP**). The
+registry (decision 9) is exactly what makes this small: MCP is just another tool
+source feeding the same `REGISTRY`, so nothing downstream — `build_toolset`, the
+loop, events, sessions — changes. It lets users add whole tool suites (filesystem,
+git, search, a Lean MCP server) from config with no code.
+
 ---
 
 ## mini-swe-agent alignment
@@ -201,6 +242,7 @@ on), marked where Lea follows it vs. diverges and why.
 
 ## Deferred (not yet decided / built)
 
-MCP servers (their tools register into the same registry — decision 9); swappable
-verifier; benchmark config + eval-harness adoption; pluggable `model_class`
-registry for non-LiteLLM backends.
+Swappable verifier (behind one tool interface); benchmark config + eval-harness
+adoption (eval still passes bare model names → need `provider/` prefix);
+pluggable `model_class` registry for non-LiteLLM backends; MCP resources/prompts
+(only tools are wired today); remote-MCP auth flows beyond static headers.

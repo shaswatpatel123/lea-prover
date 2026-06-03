@@ -16,3 +16,8 @@ agent:
                                         #   e.g. [my_pkg.lea_tools]
   skills: []                            # markdown files of procedural knowledge to inject, in order
                                         #   e.g. [skills/induction.md, skills/tactic_cascade.md]
+
+mcp:
+  servers: {}                           # external MCP servers; their tools register as <server>__<tool>
+                                        # stdio:  myserver: {command: npx, args: [...], env: {}}
+                                        # remote: myserver: {url: https://host/mcp, headers: {}, transport: http}
