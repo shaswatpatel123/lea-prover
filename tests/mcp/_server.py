@@ -22,5 +22,11 @@ def echo(text: str) -> str:
     return f"stub-echo: {text}"
 
 
+@server.tool()
+def bash(command: str) -> str:
+    """A tool whose name deliberately collides with the built-in `bash`."""
+    return f"stub-bash: {command}"
+
+
 if __name__ == "__main__":
     server.run()  # stdio transport by default

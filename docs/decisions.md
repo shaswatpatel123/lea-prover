@@ -162,10 +162,19 @@ file list is the natural unit (unlike tools, which need handlers).
 
 **Decision.** Add an `mcp.servers` config section (Claude-Desktop `mcpServers`
 style). At run start, `MCPManager` connects to each server, lists its tools, and
-registers each into the shared registry as `<server>__<tool>` — after which they
-are ordinary tools to the loop, governed by the same `agent.tools` allowlist.
-`agent.run_events` owns the lifecycle: it starts the manager (so MCP tools are
-registered *before* `build_toolset`) and stops it in a `finally`.
+registers each into the shared registry — after which they are ordinary tools to
+the loop, governed by the same `agent.tools` allowlist. `agent.run_events` owns
+the lifecycle: it starts the manager (so MCP tools are registered *before*
+`build_toolset`) and stops it in a `finally`.
+
+**Naming: bare, prefix only on collision.** MCP tools register under their *real*
+name (`lean_run_code`), matching Claude Desktop/Cursor and how models are trained
+to call MCP tools. Only when a name is already taken (a built-in or another
+server) do we prefix the clashing one with `<server>__`; the handler still calls
+the real tool name on the server. This was changed after a live test against
+`lean-lsp-mcp`: with always-`<server>__<tool>` naming, the model wasted 5 turns
+calling the bare `lean_run_code` (getting "unknown tool") before using the
+prefixed name — clear evidence that always-prefixing fights the model.
 
 Sub-decisions (user-chosen): **both transports** — stdio (subprocess `command`)
 and remote (`url`, streamable HTTP default or `transport: sse`); `mcp` is a

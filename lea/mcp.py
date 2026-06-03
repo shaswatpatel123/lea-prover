@@ -18,6 +18,7 @@ other tools); it does not abort the agent.
 """
 
 import asyncio
+import os
 import sys
 import threading
 from contextlib import AsyncExitStack
@@ -28,7 +29,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from .errors import McpError
-from .registry import Tool, register, unregister
+from .registry import REGISTRY, Tool, register, unregister
 
 
 def _warn(msg: str) -> None:
@@ -99,10 +100,15 @@ class MCPManager:
 
     async def _connect_one(self, stack: AsyncExitStack, name: str, spec: dict) -> None:
         if "command" in spec:
+            # Merge configured env over the inherited environment: the SDK uses
+            # `env` verbatim when set (no inheritance), so passing only e.g.
+            # LEAN_PROJECT_PATH would strip PATH and the command wouldn't be found.
+            cfg_env = spec.get("env")
+            env = {**os.environ, **cfg_env} if cfg_env else None
             params = StdioServerParameters(
                 command=spec["command"],
                 args=spec.get("args", []),
-                env=spec.get("env") or None,
+                env=env,
                 cwd=spec.get("cwd"),
             )
             read, write = await stack.enter_async_context(stdio_client(params))
@@ -120,7 +126,18 @@ class MCPManager:
         listed = await session.list_tools()
         self._sessions[name] = session
         for t in listed.tools:
-            tname = f"{name}__{t.name}"
+            # Expose the tool by its bare name (how models expect MCP tools, à la
+            # Claude Desktop/Cursor). Only on a name clash do we prefix with
+            # `<server>__` to disambiguate. The handler always calls the real MCP
+            # tool name on the server, regardless of the registry display name.
+            tname = t.name
+            if tname in REGISTRY:
+                prefixed = f"{name}__{t.name}"
+                if prefixed in REGISTRY:
+                    _warn(f"tool {t.name!r} from server {name!r} clashes even after prefixing; skipping")
+                    continue
+                _warn(f"tool {t.name!r} from server {name!r} clashes; exposing it as {prefixed!r}")
+                tname = prefixed
             schema = {
                 "name": tname,
                 "description": t.description or "",

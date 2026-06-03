@@ -12,6 +12,7 @@ Exits 0 if every check passes, 1 otherwise.
 import sys
 from pathlib import Path
 
+import lea.tools  # noqa: F401 — register built-ins so the collision test is meaningful
 from lea.mcp import MCPManager
 from lea.registry import REGISTRY, build_toolset
 
@@ -32,16 +33,24 @@ def test_stdio_roundtrip():
     try:
         schemas, handlers = build_toolset(None)
         names = [s["name"] for s in schemas]
-        check("stub__secret registered (namespaced)", "stub__secret" in names)
-        check("stub__echo registered (namespaced)", "stub__echo" in names)
-        check("secret tool call returns server value", handlers["stub__secret"]({}) == "MCP-SECRET-9")
-        check("echo tool call passes args", handlers["stub__echo"]({"text": "hi"}) == "stub-echo: hi")
-        echo_schema = next(s for s in schemas if s["name"] == "stub__echo")
+        # Non-colliding tools register under their bare names.
+        check("secret registered by bare name", "secret" in names)
+        check("echo registered by bare name", "echo" in names)
+        check("secret tool call returns server value", handlers["secret"]({}) == "MCP-SECRET-9")
+        check("echo tool call passes args", handlers["echo"]({"text": "hi"}) == "stub-echo: hi")
+        echo_schema = next(s for s in schemas if s["name"] == "echo")
         check("echo schema carries input_schema", "text" in echo_schema["input_schema"].get("properties", {}))
         check("echo schema carries description", bool(echo_schema["description"]))
+        # `bash` collides with the built-in, so it is exposed prefixed; the
+        # built-in `bash` keeps its name, the MCP one is reachable via stub__bash.
+        check("colliding tool prefixed to stub__bash", "stub__bash" in names)
+        check("built-in bash still bare", "bash" in names)
+        check("prefixed tool calls the MCP server", handlers["stub__bash"]({"command": "x"}) == "stub-bash: x")
     finally:
         mgr.stop()
-    check("MCP tools unregistered after stop", not any(n.startswith("stub__") for n in REGISTRY))
+    check("bare MCP tools unregistered after stop", "secret" not in REGISTRY and "echo" not in REGISTRY)
+    check("prefixed MCP tool unregistered after stop", "stub__bash" not in REGISTRY)
+    check("built-in bash survives MCP stop", "bash" in REGISTRY)
 
 
 def test_warn_and_continue_on_bad_server():
