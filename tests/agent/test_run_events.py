@@ -53,13 +53,13 @@ def install_fakes():
             handler=lambda a: "echoed:" + str(a),
         ))
     agent._save_session = lambda *a, **k: None
-    agent.load_system_prompt = lambda variant: "SYS"
+    agent.load_system_prompt = lambda variant, skills=None: "SYS"
 
 
-def cfg(max_turns=None, tools=None):
+def cfg(max_turns=None, tools=None, skills=None):
     return LeaConfig(model_name="gemini/test", model_kwargs={}, stream=True,
                      prompt_variant="default", max_turns=max_turns,
-                     tools=tools, tool_modules=[])
+                     tools=tools, tool_modules=[], skills=skills or [])
 
 
 def test_run_events_sequence():

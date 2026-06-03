@@ -98,7 +98,7 @@ def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
     Yields SessionResumed?, then per turn: TurnStarted, AssistantTextDelta*,
     ToolCalled*, UsageUpdated, ToolResulted*, and finally Finished.
     """
-    system = load_system_prompt(config.prompt_variant)
+    system = load_system_prompt(config.prompt_variant, config.skills)
     model = config.model_name
 
     # Resolve the active toolset once: import any user tool modules so their

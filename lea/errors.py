@@ -34,3 +34,7 @@ class InvalidConfigValueError(ConfigError):
 class ToolError(LeaError):
     """A tool/registry problem: duplicate registration, unknown tool selected,
     or a `tool_modules` import that failed."""
+
+
+class SkillError(LeaError):
+    """A skill problem: a skill file named in `agent.skills` is missing or unreadable."""

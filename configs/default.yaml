@@ -14,3 +14,5 @@ agent:
                                         #   e.g. [read_file, write_file, edit_file, lean_check, search_mathlib]  (drops bash)
   tool_modules: []                      # python modules to import so their custom tools register
                                         #   e.g. [my_pkg.lea_tools]
+  skills: []                            # markdown files of procedural knowledge to inject, in order
+                                        #   e.g. [skills/induction.md, skills/tactic_cascade.md]
