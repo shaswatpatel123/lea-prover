@@ -58,6 +58,7 @@ def test_defaults_match_today():
     check("defaults: max_turns is None", cfg.max_turns is None)
     check("defaults: tools is None (all)", cfg.tools is None)
     check("defaults: tool_modules is []", cfg.tool_modules == [])
+    check("defaults: skills is []", cfg.skills == [])
 
 
 def test_valid_passes():
@@ -112,6 +113,9 @@ def test_typed_errors():
 
     bad_modules = valid_raw(); bad_modules["agent"]["tool_modules"] = "my.module"
     expect_raises("tool_modules not a list", InvalidConfigValueError, lambda: validate_config(bad_modules))
+
+    bad_skills = valid_raw(); bad_skills["agent"]["skills"] = "skills/induction.md"
+    expect_raises("skills not a list", InvalidConfigValueError, lambda: validate_config(bad_skills))
 
     expect_raises("top not a mapping", ConfigFormatError, lambda: validate_config("hello"))
 

@@ -20,7 +20,7 @@ from .errors import (
 # Recognized keys per section. Anything outside these is an UnknownConfigKeyError.
 _TOP_KEYS = {"model", "agent"}
 _MODEL_KEYS = {"name", "model_kwargs", "stream"}
-_AGENT_KEYS = {"prompt_variant", "max_turns", "tools", "tool_modules"}
+_AGENT_KEYS = {"prompt_variant", "max_turns", "tools", "tool_modules", "skills"}
 # Keys that must be present (others are optional and may be omitted/null).
 _AGENT_REQUIRED = {"prompt_variant", "max_turns"}
 
@@ -36,6 +36,7 @@ class LeaConfig:
     max_turns: int | None    # None → run until the proof is done
     tools: list[str] | None  # tool allowlist (order = call order); None → all registered tools
     tool_modules: list[str]  # python modules to import so custom tools register
+    skills: list[str]        # skill markdown files to inject into the system prompt, in order
 
 
 def _reject_unknown(section: str, got: dict, allowed: set[str]) -> None:
@@ -123,8 +124,10 @@ def validate_config(raw: dict) -> LeaConfig:
     # tool_modules → no custom modules.
     tools = agent.get("tools")
     tool_modules = agent.get("tool_modules")
+    skills = agent.get("skills")
     _check_opt_str_list("agent", "tools", tools)
     _check_opt_str_list("agent", "tool_modules", tool_modules)
+    _check_opt_str_list("agent", "skills", skills)
 
     return LeaConfig(
         model_name=model["name"],
@@ -134,4 +137,5 @@ def validate_config(raw: dict) -> LeaConfig:
         max_turns=agent["max_turns"],
         tools=tools,
         tool_modules=tool_modules or [],
+        skills=skills or [],
     )

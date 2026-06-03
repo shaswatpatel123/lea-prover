@@ -135,6 +135,29 @@ tables as their source and register in bulk, so nothing about today's six tools
 changed — only how the loop reaches them. The event contract, sessions, and
 transcripts are untouched.
 
+## 10. Skills = config-listed markdown injected into the system prompt
+
+**Decision.** A *skill* is a markdown fragment of procedural knowledge (a tactic
+recipe, a naming convention, project house rules). `agent.skills` is an optional,
+ordered list of file paths (default `[]`); `load_skills` reads each and appends it
+under a `## Skill: <stem>` header, and `load_system_prompt(variant, skills)`
+injects them **always-on** after the base variant. A new `lea/skills.py` owns the
+I/O; a missing/unreadable file raises typed `SkillError`. The implicit `lea.md`
+auto-append is **kept** for back-compat; skills are the explicit path and are
+injected after it.
+
+Chosen over the alternatives: explicit file list (not directory auto-discovery —
+same magic-path we left behind with `lea.md`); plain markdown (not frontmatter —
+zero ceremony; frontmatter/menus can come if we ever add triggered loading); and
+always-on injection (not model-triggered progressive disclosure — that's a much
+bigger feature than "knowledge the agent should always have").
+
+**Why.** Second of the three extension points (tools / MCP / **skills**). It makes
+procedural knowledge a config artifact users can add/remove/reorder without
+touching code or the prompt source, mirroring the tools allowlist (decision 9):
+explicit, ordered, validated, no magic. No registry — skills are just text, so a
+file list is the natural unit (unlike tools, which need handlers).
+
 ---
 
 ## mini-swe-agent alignment
@@ -178,6 +201,6 @@ on), marked where Lea follows it vs. diverges and why.
 
 ## Deferred (not yet decided / built)
 
-MCP servers (their tools register into the same registry — decision 9); skills
-(procedural-knowledge prompt injection); swappable verifier; benchmark config +
-eval-harness adoption; pluggable `model_class` registry for non-LiteLLM backends.
+MCP servers (their tools register into the same registry — decision 9); swappable
+verifier; benchmark config + eval-harness adoption; pluggable `model_class`
+registry for non-LiteLLM backends.
