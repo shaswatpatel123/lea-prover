@@ -59,6 +59,7 @@ def test_defaults_match_today():
     check("defaults: tools is None (all)", cfg.tools is None)
     check("defaults: tool_modules is []", cfg.tool_modules == [])
     check("defaults: skills is []", cfg.skills == [])
+    check("defaults: mcp_servers is {}", cfg.mcp_servers == {})
 
 
 def test_valid_passes():
@@ -116,6 +117,25 @@ def test_typed_errors():
 
     bad_skills = valid_raw(); bad_skills["agent"]["skills"] = "skills/induction.md"
     expect_raises("skills not a list", InvalidConfigValueError, lambda: validate_config(bad_skills))
+
+    # mcp section
+    mcp_both = valid_raw(); mcp_both["mcp"] = {"servers": {"x": {"command": "c", "url": "u"}}}
+    expect_raises("mcp server with command+url", InvalidConfigValueError, lambda: validate_config(mcp_both))
+
+    mcp_neither = valid_raw(); mcp_neither["mcp"] = {"servers": {"x": {"args": []}}}
+    expect_raises("mcp server with neither", InvalidConfigValueError, lambda: validate_config(mcp_neither))
+
+    mcp_badkey = valid_raw(); mcp_badkey["mcp"] = {"servers": {"x": {"command": "c", "nope": 1}}}
+    expect_raises("mcp stdio unknown key", UnknownConfigKeyError, lambda: validate_config(mcp_badkey))
+
+    mcp_transport = valid_raw(); mcp_transport["mcp"] = {"servers": {"x": {"url": "u", "transport": "ftp"}}}
+    expect_raises("mcp bad transport", InvalidConfigValueError, lambda: validate_config(mcp_transport))
+
+    mcp_servers_type = valid_raw(); mcp_servers_type["mcp"] = {"servers": ["nope"]}
+    expect_raises("mcp servers not a mapping", ConfigFormatError, lambda: validate_config(mcp_servers_type))
+
+    mcp_ok = valid_raw(); mcp_ok["mcp"] = {"servers": {"fs": {"command": "npx", "args": ["x"], "env": {}}}}
+    check("mcp valid stdio server passes", validate_config(mcp_ok).mcp_servers["fs"]["command"] == "npx")
 
     expect_raises("top not a mapping", ConfigFormatError, lambda: validate_config("hello"))
 
