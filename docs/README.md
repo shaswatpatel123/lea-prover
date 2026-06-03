@@ -15,6 +15,9 @@ the code survives beyond any single change.
   direction, agent-as-product / eval-as-consumer split, the streaming LiteLLM
   engine, `model_kwargs`, cost transparency, and the mini-swe-agent alignment —
   with rationale.
+- [lean-lsp-mcp.md](lean-lsp-mcp.md) — **how-to guide**: wire the `lean-lsp-mcp`
+  server (Lean LSP tools + Mathlib search) and a Lean skill into Lea via config,
+  with a full copy-paste example.
 
 ## Conventions
 
