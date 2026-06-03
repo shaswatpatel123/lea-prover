@@ -56,6 +56,8 @@ def test_defaults_match_today():
     check("defaults: stream is True", cfg.stream is True)
     check("defaults: prompt_variant", cfg.prompt_variant == "default")
     check("defaults: max_turns is None", cfg.max_turns is None)
+    check("defaults: tools is None (all)", cfg.tools is None)
+    check("defaults: tool_modules is []", cfg.tool_modules == [])
 
 
 def test_valid_passes():
@@ -101,6 +103,15 @@ def test_typed_errors():
 
     str_turns = valid_raw(); str_turns["agent"]["max_turns"] = "lots"
     expect_raises("max_turns str", InvalidConfigValueError, lambda: validate_config(str_turns))
+
+    bad_tools = valid_raw(); bad_tools["agent"]["tools"] = "lean_check"
+    expect_raises("tools not a list", InvalidConfigValueError, lambda: validate_config(bad_tools))
+
+    bad_tool_items = valid_raw(); bad_tool_items["agent"]["tools"] = ["ok", 3]
+    expect_raises("tools list with non-str", InvalidConfigValueError, lambda: validate_config(bad_tool_items))
+
+    bad_modules = valid_raw(); bad_modules["agent"]["tool_modules"] = "my.module"
+    expect_raises("tool_modules not a list", InvalidConfigValueError, lambda: validate_config(bad_modules))
 
     expect_raises("top not a mapping", ConfigFormatError, lambda: validate_config("hello"))
 

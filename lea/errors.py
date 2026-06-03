@@ -29,3 +29,8 @@ class MissingConfigKeyError(ConfigError):
 
 class InvalidConfigValueError(ConfigError):
     """A key is present but its value has the wrong type (e.g. max_tokens: "lots")."""
+
+
+class ToolError(LeaError):
+    """A tool/registry problem: duplicate registration, unknown tool selected,
+    or a `tool_modules` import that failed."""
