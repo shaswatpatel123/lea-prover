@@ -35,6 +35,7 @@ the API.
 | `GET  /v1/runs/{id}/events` | SSE event stream; `Last-Event-ID` / `?from_seq=` replay |
 | `GET  /v1/runs/{id}` | run status + result |
 | `GET  /v1/runs/{id}/transcript` | clean transcript (once finished) |
+| `POST /v1/runs/{id}/approvals/{approval_id}` | accept/reject a pending approval checkpoint |
 | `POST /v1/runs/{id}/cancel` | cooperative cancel (closes the generator → MCP teardown) |
 | `GET  /v1/runs` | list/filter runs |
 | `POST /v1/config/validate` | validate a config payload; no run, no disk |
@@ -55,7 +56,9 @@ resumes exactly where it left off. Cancel sets a flag; the worker closes the
 generator at the next event boundary, reusing `run_events`' own `finally` for
 clean MCP teardown. `wire.py` is the single mapping from event dataclasses to the
 versioned JSON frames (the `Finished` frame links the transcript rather than
-inlining it). Run state is in-memory in v1.
+inlining it). Approval checkpoints pause the worker in a `paused` state until a
+client posts an accept/reject decision, and cancellation still wakes the paused
+worker. Run state is in-memory in v1.
 
 ## Tests
 

@@ -28,6 +28,11 @@ class RunRequest(BaseModel):
     resume: bool | str = False
 
 
+class ApprovalDecisionRequest(BaseModel):
+    decision: str
+    feedback: str | None = None
+
+
 def _manager(request: Request) -> RunManager:
     return request.app.state.manager
 
@@ -86,6 +91,19 @@ def cancel_run(request: Request, run_id: str) -> dict:
     state = _require_run(request, run_id)
     _manager(request).cancel(state)
     return {"run_id": run_id, "status": state.status}
+
+
+@router.post("/{run_id}/approvals/{approval_id}")
+def resolve_approval(request: Request, run_id: str, approval_id: str, req: ApprovalDecisionRequest) -> dict:
+    if req.decision not in {"accept", "reject"}:
+        raise HTTPException(status_code=422, detail="decision must be 'accept' or 'reject'.")
+    if req.decision == "reject" and not (req.feedback or "").strip():
+        raise HTTPException(status_code=422, detail="feedback is required when rejecting an approval.")
+
+    state = _require_run(request, run_id)
+    if not _manager(request).resolve_approval(state, approval_id, req.decision, req.feedback):
+        raise HTTPException(status_code=409, detail="No matching pending approval for this run.")
+    return {"run_id": run_id, "approval_id": approval_id, "decision": req.decision, "status": "running"}
 
 
 @router.get("/{run_id}/events")

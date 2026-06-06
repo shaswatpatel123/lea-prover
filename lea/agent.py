@@ -7,6 +7,7 @@ so existing callers (CLI, eval) keep working unchanged.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from .events import (
     AssistantTextDelta,
     ToolCalled,
     ToolResulted,
+    ApprovalRequested,
+    ApprovalResolved,
     UsageUpdated,
     Finished,
 )
@@ -56,6 +59,204 @@ Rules:
 - Do not mention JSON, API internals, or hidden/private reasoning.
 - Do not call tools. Return only the narration text.
 """
+
+
+_THEOREM_TRANSLATION_PROMPT = """
+You are Lea in theorem-translation review mode.
+
+Translate the user's natural-language theorem into a Lean 4 theorem declaration.
+Return exactly one self-contained Lean 4 file inside a ```lean code block.
+
+Rules:
+- Include imports and any necessary namespace/open statements.
+- Include exactly one top-level theorem or lemma that corresponds to the user's theorem.
+- The theorem body must be `by sorry`.
+- Do not prove the theorem.
+- Do not introduce helper lemmas.
+- Do not weaken, simplify, or replace the user's mathematical claim.
+- If previous feedback is provided, incorporate it into the next declaration.
+"""
+
+
+def _extract_lean_code(text: str) -> str:
+    """Pull a Lean code block from model output, or use the raw text as a fallback."""
+    match = re.search(r"```(?:lean|Lean)?\s*(.*?)```", text, re.DOTALL)
+    code = match.group(1) if match else text
+    return code.strip()
+
+
+def _extract_theorem_name(code: str) -> str | None:
+    match = re.search(r"^\s*(?:theorem|lemma)\s+([A-Za-z_][A-Za-z0-9_']*)\b", code, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def _as_sorry_skeleton(code: str) -> str:
+    """Keep imports/header, force the first theorem/lemma body to `by sorry`."""
+    match = re.search(
+        r"^\s*(?:theorem|lemma)\s+[A-Za-z_][A-Za-z0-9_']*\b.*?:=",
+        code,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        return code
+    return code[:match.end()].rstrip() + " by sorry"
+
+
+def _theorem_header(code: str, theorem_name: str | None = None) -> str | None:
+    """Return a whitespace-normalized declaration header through `:=`.
+
+    This intentionally stays lightweight: it catches ordinary statement drift
+    without trying to parse Lean.
+    """
+    if theorem_name:
+        pattern = rf"^\s*(?:theorem|lemma)\s+{re.escape(theorem_name)}\b.*?:="
+    else:
+        pattern = r"^\s*(?:theorem|lemma)\s+[A-Za-z_][A-Za-z0-9_']*\b.*?:="
+    match = re.search(pattern, code, re.MULTILINE | re.DOTALL)
+    if not match:
+        return None
+    return " ".join(match.group(0).split())
+
+
+def _proposal_file(session_id: str, candidate: int) -> Path:
+    directory = Path(__file__).resolve().parent.parent / "workspace" / "proofs" / ".lea_proposals"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{session_id}_theorem_translation_{candidate}.lean"
+
+
+def _lean_check_has_error(output: str) -> bool:
+    return bool(re.search(r"(^|\n).*error[:\s]", output, re.IGNORECASE))
+
+
+def _checked_theorem_translation(
+    *,
+    model: str,
+    task: str,
+    feedback: list[str],
+    config: LeaConfig,
+    candidate: int,
+    session_id: str,
+):
+    """Generate and typecheck a theorem translation candidate.
+
+    Retries invalid Lean internally up to three times. Returns
+    (code, theorem_name, check_result, usage, cost).
+    """
+    messages = [{"role": "user", "content": task}]
+    if feedback:
+        messages.append({
+            "role": "user",
+            "content": "User feedback on previous theorem translations:\n" + "\n".join(
+                f"- {item}" for item in feedback
+            ),
+        })
+
+    usage = Usage()
+    cost = 0.0
+    diagnostics: list[str] = []
+    last_code = ""
+    last_check = ""
+
+    for attempt in range(1, 4):
+        attempt_messages = list(messages)
+        if diagnostics:
+            attempt_messages.append({
+                "role": "user",
+                "content": (
+                    "The previous Lean theorem declaration did not typecheck. "
+                    "Return a corrected declaration only.\n\n"
+                    + "\n\n".join(diagnostics[-2:])
+                ),
+            })
+
+        text = ""
+        for event in stream(
+            model,
+            _THEOREM_TRANSLATION_PROMPT,
+            attempt_messages,
+            [],
+            config.model_kwargs,
+            streaming=config.stream,
+        ):
+            if isinstance(event, TextDelta):
+                text += event.text
+            elif isinstance(event, Done):
+                usage.input_tokens += event.usage.input_tokens
+                usage.output_tokens += event.usage.output_tokens
+                cost += event.cost
+
+        code = _as_sorry_skeleton(_extract_lean_code(text))
+        last_code = code
+        path = _proposal_file(session_id, candidate)
+        path.write_text(code + "\n")
+        check = _tools.lean_check(str(path))
+        last_check = check
+        if not _lean_check_has_error(check):
+            return code, _extract_theorem_name(code), check, usage, cost
+        diagnostics.append(f"Attempt {attempt} diagnostics:\n{check}")
+
+    raise RuntimeError(
+        "theorem translation failed to typecheck after 3 attempts.\n\n"
+        f"Last candidate:\n{last_code}\n\nLast diagnostics:\n{last_check}"
+    )
+
+
+def _approval_decision(value) -> tuple[str, str | None]:
+    if not isinstance(value, dict):
+        raise RuntimeError("approval decision required: send {'decision': 'accept'|'reject', 'feedback': str}.")
+    decision = value.get("decision")
+    feedback = value.get("feedback")
+    if decision not in {"accept", "reject"}:
+        raise RuntimeError("approval decision must be 'accept' or 'reject'.")
+    if feedback is not None and not isinstance(feedback, str):
+        raise RuntimeError("approval feedback must be a string when provided.")
+    return decision, feedback
+
+
+def _guarded_tool_handlers(tool_handlers: dict, accepted_header: str | None, theorem_name: str | None) -> dict:
+    if not accepted_header:
+        return tool_handlers
+
+    def check_content(content: str) -> str | None:
+        header = _theorem_header(content, theorem_name)
+        if header is not None and header != accepted_header:
+            return (
+                "Error: attempted to change the accepted top-level theorem statement. "
+                "Keep the theorem declaration header exactly as approved by the user."
+            )
+        return None
+
+    guarded = dict(tool_handlers)
+    write_handler = tool_handlers.get("write_file")
+    edit_handler = tool_handlers.get("edit_file")
+
+    if write_handler:
+        def guarded_write(args):
+            content = args.get("content")
+            if isinstance(content, str):
+                error = check_content(content)
+                if error:
+                    return error
+            return write_handler(args)
+        guarded["write_file"] = guarded_write
+
+    if edit_handler:
+        def guarded_edit(args):
+            path = args.get("path")
+            old = args.get("old_string")
+            new = args.get("new_string")
+            if isinstance(path, str) and isinstance(old, str) and isinstance(new, str):
+                p = Path(path).expanduser()
+                if p.exists() and p.suffix == ".lean":
+                    text = p.read_text()
+                    if old in text:
+                        error = check_content(text.replace(old, new, 1))
+                        if error:
+                            return error
+            return edit_handler(args)
+        guarded["edit_file"] = guarded_edit
+
+    return guarded
 
 
 def _tool_call_for_prompt(name: str, args: dict) -> dict:
@@ -270,6 +471,82 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
             "usage": {"input_tokens": total_usage.input_tokens, "output_tokens": total_usage.output_tokens},
             "messages": clean,
         }
+
+    if config.permission_tier == "theorem_translation":
+        feedback: list[str] = []
+        candidate = 0
+        while True:
+            candidate += 1
+            try:
+                code, theorem_name, check_result, proposal_usage, proposal_cost = _checked_theorem_translation(
+                    model=model,
+                    task=task,
+                    feedback=feedback,
+                    config=config,
+                    candidate=candidate,
+                    session_id=session_id,
+                )
+            except Exception as e:
+                _save_session(session_id, model, messages, total_usage)
+                yield Finished(
+                    "theorem_translation_failed",
+                    f"Error: theorem translation failed: {type(e).__name__}: {e}",
+                    0,
+                    session_id,
+                    model,
+                    total_usage,
+                    total_cost,
+                    transcript(0),
+                )
+                return
+
+            total_usage.input_tokens += proposal_usage.input_tokens
+            total_usage.output_tokens += proposal_usage.output_tokens
+            total_cost += proposal_cost
+            if proposal_usage.input_tokens or proposal_usage.output_tokens or proposal_cost:
+                yield UsageUpdated(proposal_usage.input_tokens, proposal_usage.output_tokens, proposal_cost)
+
+            approval_id = f"{session_id}-theorem-translation-{candidate}"
+            decision_value = yield ApprovalRequested(
+                approval_id=approval_id,
+                tier="theorem_translation",
+                candidate=candidate,
+                lean_code=code,
+                theorem_name=theorem_name,
+                check_result=check_result,
+            )
+            decision, rejection_feedback = _approval_decision(decision_value)
+            yield ApprovalResolved(approval_id, decision, rejection_feedback)
+
+            if decision == "accept":
+                accepted_header = _theorem_header(code, theorem_name)
+                tool_handlers = _guarded_tool_handlers(tool_handlers, accepted_header, theorem_name)
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "The user accepted this top-level Lean theorem translation. "
+                        "Use this declaration exactly as the top-level theorem statement. "
+                        "Do not change its name, binders, type signature, or proposition while proving it.\n\n"
+                        "```lean\n"
+                        f"{code}\n"
+                        "```"
+                    ),
+                })
+                _save_session(session_id, model, messages, total_usage)
+                break
+
+            rejection_feedback = (rejection_feedback or "").strip()
+            if not rejection_feedback:
+                raise RuntimeError("rejecting a theorem translation requires natural-language feedback.")
+            feedback.append(rejection_feedback)
+            messages.append({
+                "role": "user",
+                "content": (
+                    "The user rejected the previous top-level Lean theorem translation with this feedback:\n"
+                    f"{rejection_feedback}"
+                ),
+            })
+            _save_session(session_id, model, messages, total_usage)
 
     turn = 0
     while True:

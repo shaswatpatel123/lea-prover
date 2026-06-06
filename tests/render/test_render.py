@@ -9,6 +9,7 @@ Exits 0 if every check passes, 1 otherwise.
 
 import io
 import sys
+import builtins
 from contextlib import redirect_stdout
 from dataclasses import FrozenInstanceError
 
@@ -20,6 +21,8 @@ from lea.events import (
     AssistantTextDelta,
     ToolCalled,
     ToolResulted,
+    ApprovalRequested,
+    ApprovalResolved,
     UsageUpdated,
     Finished,
 )
@@ -130,12 +133,57 @@ def test_session_resumed():
     check("session resumed line printed", out.startswith("Resuming session 20260602-000000 (3 messages)\n"))
 
 
+def approval_generator():
+    decision = yield ApprovalRequested(
+        approval_id="ap_1",
+        tier="theorem_translation",
+        candidate=1,
+        lean_code="theorem t : True := by sorry",
+        theorem_name="t",
+        check_result="warning: declaration uses 'sorry'",
+    )
+    yield ApprovalResolved("ap_1", decision["decision"], decision.get("feedback"))
+    yield Finished(
+        reason="completed", text=decision["decision"], turns=0, session_id="sid",
+        model="gemini/test", usage=Usage(0, 0), cost=0.0, transcript={"decision": decision},
+    )
+
+
+def render_capture_with_input(events, answers) -> tuple[str, tuple]:
+    buf = io.StringIO()
+    answer_iter = iter(answers)
+    old_input = builtins.input
+    builtins.input = lambda prompt="": next(answer_iter)
+    try:
+        with redirect_stdout(buf):
+            result = render_to_stdout(events)
+    finally:
+        builtins.input = old_input
+    return buf.getvalue(), result
+
+
+def test_approval_prompt_accepts():
+    out, (text, transcript) = render_capture_with_input(approval_generator(), ["y"])
+    check("approval prompt prints Lean code", "theorem t : True" in out)
+    check("approval accept sent to generator", text == "accept")
+    check("approval accept transcript", transcript["decision"]["decision"] == "accept")
+
+
+def test_approval_prompt_rejects_with_feedback():
+    out, (text, transcript) = render_capture_with_input(approval_generator(), ["n", "wrong statement"])
+    check("approval reject line printed", "rejected" in out)
+    check("approval reject sent to generator", text == "reject")
+    check("approval reject feedback sent", transcript["decision"]["feedback"] == "wrong statement")
+
+
 def main():
     print("events + render tests:")
     test_frozen()
     test_completed_parity_with_per_turn_cost()
     test_max_turns_no_blank_line()
     test_session_resumed()
+    test_approval_prompt_accepts()
+    test_approval_prompt_rejects_with_feedback()
     print()
     if _FAILURES:
         print(f"FAILED ({len(_FAILURES)}): {', '.join(_FAILURES)}")

@@ -19,6 +19,7 @@ def test_config_validate_ok(client):
     assert body["valid"] is True
     assert body["config"]["model_name"]            # resolved from default.yaml
     assert body["config"]["narrate_tool_steps"] is False
+    assert body["config"]["permission_tier"] == "none"
     assert "mcp_servers" in body["config"]
 
 

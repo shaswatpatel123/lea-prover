@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 
 from lea.config import LeaConfig
 from lea.errors import LeaError
-from lea.events import Finished, SessionResumed, TurnStarted, UsageUpdated
+from lea.events import ApprovalRequested, Finished, SessionResumed, TurnStarted, UsageUpdated
 
 from . import errors as api_errors
 from . import wire
@@ -48,9 +48,12 @@ class RunState:
     result: dict | None = None
     transcript: dict | None = None
     error: dict | None = None
+    pending_approval: dict | None = None
+    approval_decision: dict | None = None
     created_at: str = field(default_factory=_now)
     finished_at: str | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    approval_condition: threading.Condition = field(default_factory=threading.Condition)
     done: bool = False
     _next_seq: int = 0
     _subscribers: set = field(default_factory=set)     # set[asyncio.Queue]
@@ -67,6 +70,7 @@ class RunState:
             "status": self.status,
             "model": self.model,
             "result": self.result,
+            "pending_approval": self.pending_approval,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
         }
@@ -118,6 +122,16 @@ class RunManager:
 
     def cancel(self, state: RunState) -> None:
         state.cancel_event.set()
+        with state.approval_condition:
+            state.approval_condition.notify_all()
+
+    def resolve_approval(self, state: RunState, approval_id: str, decision: str, feedback: str | None = None) -> bool:
+        with state.approval_condition:
+            if state.pending_approval is None or state.pending_approval.get("approval_id") != approval_id:
+                return False
+            state.approval_decision = {"decision": decision, "feedback": feedback}
+            state.approval_condition.notify_all()
+            return True
 
     # ---- the worker ---------------------------------------------------------
 
@@ -134,7 +148,14 @@ class RunManager:
         cancelled = False
 
         try:
-            for ev in gen:
+            send_value = None
+            while True:
+                if send_value is None:
+                    ev = next(gen)
+                else:
+                    ev = gen.send(send_value)
+                    send_value = None
+
                 if isinstance(ev, TurnStarted):
                     turns = ev.turn
                 elif isinstance(ev, UsageUpdated):
@@ -156,11 +177,32 @@ class RunManager:
                     state.status = "completed"
                     break
 
+                if isinstance(ev, ApprovalRequested):
+                    frame = wire.to_frame(ev, state.run_id)
+                    with state.approval_condition:
+                        state.status = "paused"
+                        state.pending_approval = frame
+                        state.approval_decision = None
+                    self._publish(state, frame)
+                    with state.approval_condition:
+                        while state.approval_decision is None and not state.cancel_event.is_set():
+                            state.approval_condition.wait(timeout=0.1)
+                        if state.cancel_event.is_set():
+                            cancelled = True
+                            break
+                        send_value = state.approval_decision
+                        state.pending_approval = None
+                        state.approval_decision = None
+                        state.status = "running"
+                    continue
+
                 self._publish(state, wire.to_frame(ev, state.run_id))
 
                 if state.cancel_event.is_set():
                     cancelled = True
                     break
+        except StopIteration:
+            state.status = "completed"
         except LeaError as e:
             state.error = api_errors.to_body(e)
             self._publish(state, wire.error_frame(state.error["type"], state.error["message"],

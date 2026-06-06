@@ -2,6 +2,8 @@
 
 from lea.events import (
     AssistantTextDelta,
+    ApprovalRequested,
+    ApprovalResolved,
     SessionResumed,
     ToolCalled,
     ToolResulted,
@@ -24,6 +26,21 @@ def test_each_event_maps_to_its_frame():
         "type": "tool_called", "name": "lean_check", "args": {"p": 1}}
     assert wire.to_frame(ToolResulted("t", "full", "prev"), rid) == {
         "type": "tool_resulted", "name": "t", "content": "full", "preview": "prev"}
+    assert wire.to_frame(ApprovalRequested("ap_1", "theorem_translation", 2, "theorem t : True := by sorry", "t", "OK"), rid) == {
+        "type": "approval_requested",
+        "approval_id": "ap_1",
+        "tier": "theorem_translation",
+        "candidate": 2,
+        "lean_code": "theorem t : True := by sorry",
+        "theorem_name": "t",
+        "check_result": "OK",
+    }
+    assert wire.to_frame(ApprovalResolved("ap_1", "reject", "wrong type"), rid) == {
+        "type": "approval_resolved",
+        "approval_id": "ap_1",
+        "decision": "reject",
+        "feedback": "wrong type",
+    }
     assert wire.to_frame(UsageUpdated(5, 6, 0.02), rid) == {
         "type": "usage_updated", "input_tokens": 5, "output_tokens": 6, "cost": 0.02}
 

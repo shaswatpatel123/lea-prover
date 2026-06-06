@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 
 from lea.events import (
     AssistantTextDelta,
+    ApprovalRequested,
+    ApprovalResolved,
     Finished,
     ToolCalled,
     ToolResulted,
@@ -57,6 +59,33 @@ def scripted_runner(events):
     def runner(config, task, *, resume=False):
         for ev in events:
             yield ev
+    return runner
+
+
+def approval_runner():
+    """Pauses for approval, supports reject feedback, then completes on accept."""
+    def runner(config, task, *, resume=False):
+        decision = yield ApprovalRequested(
+            approval_id="ap_1",
+            tier="theorem_translation",
+            candidate=1,
+            lean_code="theorem t : True := by sorry",
+            theorem_name="t",
+            check_result="warning: declaration uses 'sorry'",
+        )
+        yield ApprovalResolved("ap_1", decision["decision"], decision.get("feedback"))
+        if decision["decision"] == "reject":
+            decision = yield ApprovalRequested(
+                approval_id="ap_2",
+                tier="theorem_translation",
+                candidate=2,
+                lean_code="theorem t : 2 + 2 = 4 := by sorry",
+                theorem_name="t",
+                check_result="warning: declaration uses 'sorry'",
+            )
+            yield ApprovalResolved("ap_2", decision["decision"], decision.get("feedback"))
+        yield TurnStarted(1)
+        yield make_finished()
     return runner
 
 

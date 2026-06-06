@@ -17,6 +17,8 @@ agent:
   skills: []                            # markdown files of procedural knowledge to inject, in order
                                         #   e.g. [skills/induction.md, skills/tactic_cascade.md]
   narrate_tool_steps: false             # true -> prompt the model to summarize before tool calls
+  permission_tier: none                 # none -> no prompts; theorem_translation -> approve checked theorem statement
+                                        # stepwise is reserved for a later pause-after-each-step mode
 
 mcp:
   servers: {}                           # external MCP servers; their tools register as <server>__<tool>

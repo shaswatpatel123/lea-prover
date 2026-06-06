@@ -38,5 +38,6 @@ def to_public(cfg: LeaConfig) -> dict:
         "tool_modules": cfg.tool_modules,
         "skills": cfg.skills,
         "narrate_tool_steps": cfg.narrate_tool_steps,
+        "permission_tier": cfg.permission_tier,
         "mcp_servers": cfg.mcp_servers,
     }

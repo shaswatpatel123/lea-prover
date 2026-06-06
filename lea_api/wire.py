@@ -19,6 +19,8 @@ from dataclasses import asdict
 
 from lea.events import (
     AssistantTextDelta,
+    ApprovalRequested,
+    ApprovalResolved,
     Finished,
     SessionResumed,
     ToolCalled,
@@ -50,6 +52,23 @@ def to_frame(ev, run_id: str) -> dict:
     if isinstance(ev, ToolResulted):
         return {"type": "tool_resulted", "name": ev.name,
                 "content": ev.content, "preview": ev.preview}
+    if isinstance(ev, ApprovalRequested):
+        return {
+            "type": "approval_requested",
+            "approval_id": ev.approval_id,
+            "tier": ev.tier,
+            "candidate": ev.candidate,
+            "lean_code": ev.lean_code,
+            "theorem_name": ev.theorem_name,
+            "check_result": ev.check_result,
+        }
+    if isinstance(ev, ApprovalResolved):
+        return {
+            "type": "approval_resolved",
+            "approval_id": ev.approval_id,
+            "decision": ev.decision,
+            "feedback": ev.feedback,
+        }
     if isinstance(ev, UsageUpdated):
         return {"type": "usage_updated", "input_tokens": ev.input_tokens,
                 "output_tokens": ev.output_tokens, "cost": ev.cost}

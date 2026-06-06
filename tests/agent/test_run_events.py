@@ -16,7 +16,8 @@ from lea.config import LeaConfig
 from lea.registry import REGISTRY, Tool, register
 from lea.providers import TextDelta, ToolCall, Done, _ToolMeta, Usage
 from lea.events import (
-    TurnStarted, AssistantTextDelta, ToolCalled, ToolResulted, UsageUpdated, Finished,
+    TurnStarted, AssistantTextDelta, ToolCalled, ToolResulted, ApprovalRequested,
+    ApprovalResolved, UsageUpdated, Finished,
 )
 
 _FAILURES: list[str] = []
@@ -91,7 +92,67 @@ def cfg(max_turns=None, tools=None, skills=None, narrate_tool_steps=False):
     return LeaConfig(model_name="gemini/test", model_kwargs={}, stream=True,
                      prompt_variant="default", max_turns=max_turns,
                      tools=tools, tool_modules=[], skills=skills or [],
-                     narrate_tool_steps=narrate_tool_steps, mcp_servers={})
+                     narrate_tool_steps=narrate_tool_steps, permission_tier="none",
+                     mcp_servers={})
+
+
+def cfg_approval():
+    c = cfg()
+    c.permission_tier = "theorem_translation"
+    return c
+
+
+def install_approval_fake(*, guard_drift=False):
+    calls = {"n": 0, "proposal_count": 0, "guard_called": False}
+
+    def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
+        calls["n"] += 1
+        if "theorem-translation review mode" in system:
+            calls["proposal_count"] += 1
+            name = "approved_theorem"
+            prop = "True" if calls["proposal_count"] == 1 else "2 + 2 = 4"
+            yield TextDelta(f"```lean\nimport Mathlib\n\ntheorem {name} : {prop} := by sorry\n```")
+            yield Done(Usage(10, 5), 0.001)
+        elif guard_drift and not calls["guard_called"]:
+            calls["guard_called"] = True
+            yield ToolCall("write_file", {
+                "path": "workspace/proofs/GuardDrift.lean",
+                "content": "import Mathlib\n\ntheorem approved_theorem : False := by sorry\n",
+            })
+            yield _ToolMeta("call_guard")
+            yield Done(Usage(20, 10), 0.002)
+        elif guard_drift:
+            yield TextDelta("Done after guard.")
+            yield Done(Usage(5, 5), 0.0005)
+        elif calls["n"] <= 3:
+            yield TextDelta("Proving now.")
+            yield ToolCall("echo", {"x": 2})
+            yield _ToolMeta("call_2")
+            yield Done(Usage(20, 10), 0.002)
+        else:
+            yield TextDelta("All done after approval.")
+            yield Done(Usage(5, 5), 0.0005)
+
+    agent.stream = fake_stream
+    agent._tools.lean_check = lambda path: "warning: declaration uses 'sorry'"
+    if "echo" not in REGISTRY:
+        register(Tool(
+            name="echo",
+            schema={"name": "echo", "description": "echo args", "input_schema": {"type": "object"}},
+            handler=lambda a: "echoed:" + str(a),
+        ))
+    agent._save_session = lambda *a, **k: None
+    agent.load_system_prompt = lambda variant, skills=None: "SYS"
+    return calls
+
+
+def collect_until(gen, event_type):
+    events = []
+    while True:
+        ev = next(gen)
+        events.append(ev)
+        if isinstance(ev, event_type):
+            return events, ev
 
 
 def test_run_events_sequence():
@@ -174,6 +235,45 @@ def test_run_wrapper_return_shape():
     check("run() without transcript returns str", isinstance(out2, str) and out2 == "All done.")
 
 
+def test_theorem_translation_accept_continues():
+    install_approval_fake()
+    gen = agent.run_events(cfg_approval(), "prove a thing")
+    events, approval = collect_until(gen, ApprovalRequested)
+    check("approval requested before first turn", not any(isinstance(e, TurnStarted) for e in events))
+    check("approval has checked Lean code", "theorem approved_theorem" in approval.lean_code)
+
+    events.append(gen.send({"decision": "accept"}))
+    events.extend(list(gen))
+    check("approval resolved accept", any(isinstance(e, ApprovalResolved) and e.decision == "accept" for e in events))
+    check("run continues after accept", any(isinstance(e, TurnStarted) for e in events))
+    check("finished after approval", isinstance(events[-1], Finished) and events[-1].text == "All done after approval.")
+
+
+def test_theorem_translation_reject_feedback_loops():
+    calls = install_approval_fake()
+    gen = agent.run_events(cfg_approval(), "prove a thing")
+    events, first = collect_until(gen, ApprovalRequested)
+    events.append(gen.send({"decision": "reject", "feedback": "Make it arithmetic instead of trivial."}))
+    more, second = collect_until(gen, ApprovalRequested)
+    events.extend(more)
+    check("second candidate requested after rejection", second.candidate == 2)
+    check("proposal generated twice", calls["proposal_count"] == 2)
+
+    events.append(gen.send({"decision": "accept"}))
+    events.extend(list(gen))
+    check("reject then accept finishes", isinstance(events[-1], Finished))
+
+
+def test_accepted_theorem_header_guard():
+    install_approval_fake(guard_drift=True)
+    gen = agent.run_events(cfg_approval(), "prove a thing")
+    events, _ = collect_until(gen, ApprovalRequested)
+    events.append(gen.send({"decision": "accept"}))
+    events.extend(list(gen))
+    guarded = [e for e in events if isinstance(e, ToolResulted)]
+    check("header drift rejected by guarded write_file", guarded and "accepted top-level theorem" in guarded[0].content)
+
+
 def main():
     print("agent (run_events + run) tests:")
     test_run_events_sequence()
@@ -181,6 +281,9 @@ def main():
     test_narrate_tool_steps_instruction()
     test_narrate_tool_steps_forces_text_before_silent_tool_call()
     test_run_wrapper_return_shape()
+    test_theorem_translation_accept_continues()
+    test_theorem_translation_reject_feedback_loops()
+    test_accepted_theorem_header_guard()
     print()
     if _FAILURES:
         print(f"FAILED ({len(_FAILURES)}): {', '.join(_FAILURES)}")

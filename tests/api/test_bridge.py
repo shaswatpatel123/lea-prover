@@ -4,7 +4,7 @@ import time
 
 from lea_api.jobs import RunManager
 
-from .conftest import default_config, looping_runner, sample_events, scripted_runner, wait_done
+from .conftest import approval_runner, default_config, looping_runner, sample_events, scripted_runner, wait_done
 
 
 def test_run_completes_with_monotonic_seqs():
@@ -77,5 +77,64 @@ def test_failing_runner_emits_error_frame():
         assert state.events[-1]["type"] == "error"
         assert state.events[-1]["error"]["type"] == "ToolError"
         assert state.error["type"] == "ToolError"
+    finally:
+        mgr.shutdown()
+
+
+def test_approval_pause_and_accept():
+    mgr = RunManager(runner=approval_runner())
+    try:
+        state = mgr.start(default_config(), "x")
+        deadline = time.time() + 2
+        while state.status != "paused" and time.time() < deadline:
+            time.sleep(0.005)
+
+        assert state.status == "paused"
+        assert state.pending_approval["approval_id"] == "ap_1"
+        assert state.events[-1]["type"] == "approval_requested"
+
+        assert mgr.resolve_approval(state, "ap_1", "accept")
+        wait_done(state)
+        assert state.status == "completed"
+        assert any(f["type"] == "approval_resolved" and f["decision"] == "accept" for f in state.events)
+    finally:
+        mgr.shutdown()
+
+
+def test_approval_reject_loops_to_second_candidate():
+    mgr = RunManager(runner=approval_runner())
+    try:
+        state = mgr.start(default_config(), "x")
+        deadline = time.time() + 2
+        while state.status != "paused" and time.time() < deadline:
+            time.sleep(0.005)
+        assert mgr.resolve_approval(state, "ap_1", "reject", "make it arithmetic")
+
+        deadline = time.time() + 2
+        while (state.pending_approval or {}).get("approval_id") != "ap_2" and time.time() < deadline:
+            time.sleep(0.005)
+        assert state.status == "paused"
+        assert state.pending_approval["candidate"] == 2
+        assert mgr.resolve_approval(state, "ap_2", "accept")
+        wait_done(state)
+
+        requested = [f for f in state.events if f["type"] == "approval_requested"]
+        assert [f["approval_id"] for f in requested] == ["ap_1", "ap_2"]
+    finally:
+        mgr.shutdown()
+
+
+def test_cancel_while_paused():
+    mgr = RunManager(runner=approval_runner())
+    try:
+        state = mgr.start(default_config(), "x")
+        deadline = time.time() + 2
+        while state.status != "paused" and time.time() < deadline:
+            time.sleep(0.005)
+        mgr.cancel(state)
+        wait_done(state)
+        assert state.status == "cancelled"
+        assert state.events[-1]["type"] == "finished"
+        assert state.events[-1]["reason"] == "cancelled"
     finally:
         mgr.shutdown()
