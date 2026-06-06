@@ -20,7 +20,7 @@ from .errors import (
 # Recognized keys per section. Anything outside these is an UnknownConfigKeyError.
 _TOP_KEYS = {"model", "agent", "mcp"}
 _MODEL_KEYS = {"name", "model_kwargs", "stream"}
-_AGENT_KEYS = {"prompt_variant", "max_turns", "tools", "tool_modules", "skills"}
+_AGENT_KEYS = {"prompt_variant", "max_turns", "tools", "tool_modules", "skills", "narrate_tool_steps"}
 # Keys that must be present (others are optional and may be omitted/null).
 _AGENT_REQUIRED = {"prompt_variant", "max_turns"}
 _MCP_KEYS = {"servers"}
@@ -40,6 +40,7 @@ class LeaConfig:
     tools: list[str] | None  # tool allowlist (order = call order); None → all registered tools
     tool_modules: list[str]  # python modules to import so custom tools register
     skills: list[str]        # skill markdown files to inject into the system prompt, in order
+    narrate_tool_steps: bool # True → ask the model to summarize intent before tool calls
     mcp_servers: dict        # name → server spec (stdio: command/args/env/cwd, or remote: url/headers/transport)
 
 
@@ -164,6 +165,8 @@ def validate_config(raw: dict) -> LeaConfig:
     _check_bool("model", "stream", model["stream"])
     _check_str("agent", "prompt_variant", agent["prompt_variant"])
     _check_opt_int("agent", "max_turns", agent["max_turns"])
+    narrate_tool_steps = agent.get("narrate_tool_steps", False)
+    _check_bool("agent", "narrate_tool_steps", narrate_tool_steps)
 
     # Optional tool keys: omitted/null tools → all registered tools; omitted
     # tool_modules → no custom modules.
@@ -183,5 +186,6 @@ def validate_config(raw: dict) -> LeaConfig:
         tools=tools,
         tool_modules=tool_modules or [],
         skills=skills or [],
+        narrate_tool_steps=narrate_tool_steps,
         mcp_servers=mcp_servers,
     )

@@ -16,6 +16,7 @@ agent:
                                         #   e.g. [my_pkg.lea_tools]
   skills: []                            # markdown files of procedural knowledge to inject, in order
                                         #   e.g. [skills/induction.md, skills/tactic_cascade.md]
+  narrate_tool_steps: false             # true -> prompt the model to summarize before tool calls
 
 mcp:
   servers: {}                           # external MCP servers; their tools register as <server>__<tool>

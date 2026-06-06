@@ -31,6 +31,115 @@ SESSIONS_DIR = Path.home() / ".lea" / "sessions"
 _UNSET = object()  # sentinel: distinguishes "caller omitted arg" from an explicit None
 
 
+_NARRATE_TOOL_STEPS_INSTRUCTION = """
+
+When you are about to call one or more tools, first write a concise progress
+summary for the user. Keep it to one or two sentences, use Markdown when helpful,
+and include mathematical notation in normal LaTeX delimiters when useful. Explain
+what you are trying next and why, then call the tool. Do not narrate after every
+minor token or repeat boilerplate; summarize the meaningful proof step.
+"""
+
+
+_FORCED_TOOL_NARRATION_INSTRUCTION = """
+
+You are Lea explaining the next proof action to the user. The main model turn
+selected a tool call without first writing user-facing narration. Write the
+missing narration now.
+
+Rules:
+- Write one concise paragraph unless the mathematical plan genuinely benefits
+  from a short numbered list.
+- Explain the mathematical or Lean proof move being attempted and why it is the
+  next useful step.
+- Use Markdown and ordinary LaTeX delimiters when helpful.
+- Do not mention JSON, API internals, or hidden/private reasoning.
+- Do not call tools. Return only the narration text.
+"""
+
+
+def _tool_call_for_prompt(name: str, args: dict) -> dict:
+    """Compact a tool call enough to show a narration-only model pass."""
+    compact: dict = {}
+    for key, value in args.items():
+        if isinstance(value, str):
+            if key == "content" and len(value) > 1600:
+                compact[key] = value[:1600] + "\n... [truncated]"
+            elif len(value) > 800:
+                compact[key] = value[:800] + "... [truncated]"
+            else:
+                compact[key] = value
+        else:
+            compact[key] = value
+    return {"name": name, "args": compact}
+
+
+def _forced_tool_narration(
+    *,
+    model: str,
+    system: str,
+    messages: list,
+    tool_name: str,
+    tool_args: dict,
+    config: LeaConfig,
+):
+    """Ask the model for narration when a tool-only turn would otherwise be silent."""
+    narration_messages = messages + [{
+        "role": "user",
+        "content": (
+            "Write the user-facing narration that should appear immediately "
+            "before this Lea tool call:\n"
+            f"{json.dumps(_tool_call_for_prompt(tool_name, tool_args), ensure_ascii=False, indent=2)}"
+        ),
+    }]
+    text = ""
+    usage = Usage()
+    cost = 0.0
+    try:
+        for event in stream(
+            model,
+            system + _FORCED_TOOL_NARRATION_INSTRUCTION,
+            narration_messages,
+            [],
+            config.model_kwargs,
+            streaming=config.stream,
+        ):
+            if isinstance(event, TextDelta):
+                text += event.text
+                yield event
+            elif isinstance(event, Done):
+                usage.input_tokens += event.usage.input_tokens
+                usage.output_tokens += event.usage.output_tokens
+                cost += event.cost
+    except Exception:
+        fallback = _fallback_tool_narration(tool_name, tool_args)
+        text += fallback
+        yield TextDelta(fallback)
+    return text.strip(), usage, cost
+
+
+def _fallback_tool_narration(tool_name: str, args: dict) -> str:
+    path = args.get("path")
+    if tool_name == "write_file":
+        if isinstance(path, str) and path:
+            return f"I will write the next Lean proof attempt in `{path}` and then check whether it compiles."
+        return "I will write the next Lean proof attempt and then check whether it compiles."
+    if tool_name == "edit_file":
+        if isinstance(path, str) and path:
+            return f"I will revise `{path}` to address the previous Lean feedback, then re-run the checker."
+        return "I will revise the Lean proof to address the previous checker feedback, then re-run it."
+    if tool_name == "lean_check":
+        if isinstance(path, str) and path:
+            return f"I will run Lean on `{path}` to verify the current proof and inspect any errors."
+        return "I will run Lean to verify the current proof and inspect any errors."
+    if tool_name == "search_mathlib":
+        query = args.get("query")
+        if isinstance(query, str) and query:
+            return f"I will search Mathlib for lemmas related to `{query}` so the next proof step can use existing results."
+        return "I will search Mathlib for a relevant lemma before continuing the proof."
+    return f"I will use `{tool_name}` for the next proof step and then use its result to continue."
+
+
 def _save_session(session_id: str, model: str, messages: list, usage: Usage):
     """Persist conversation to disk."""
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -116,6 +225,8 @@ def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
 
 def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = False):
     system = load_system_prompt(config.prompt_variant, config.skills)
+    if config.narrate_tool_steps:
+        system += _NARRATE_TOOL_STEPS_INSTRUCTION
     model = config.model_name
 
     # Resolve the active toolset once: import any user tool modules so their
@@ -174,12 +285,41 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
         assistant_parts = []
         current_text = ""
         tool_calls = []
+        forced_narration_emitted = False
 
         for event in stream(model, system, messages, tools_schema, config.model_kwargs, streaming=config.stream):
             if isinstance(event, TextDelta):
                 current_text += event.text
                 yield AssistantTextDelta(event.text)
             elif isinstance(event, ToolCall):
+                if config.narrate_tool_steps and not forced_narration_emitted and not current_text and not any(
+                    part.get("type") == "text" and part.get("text") for part in assistant_parts
+                ):
+                    narration = _forced_tool_narration(
+                        model=model,
+                        system=system,
+                        messages=messages,
+                        tool_name=event.name,
+                        tool_args=event.args,
+                        config=config,
+                    )
+                    try:
+                        while True:
+                            narration_event = next(narration)
+                            current_text += narration_event.text
+                            yield AssistantTextDelta(narration_event.text)
+                    except StopIteration as result:
+                        _, narration_usage, narration_cost = result.value
+                        total_usage.input_tokens += narration_usage.input_tokens
+                        total_usage.output_tokens += narration_usage.output_tokens
+                        total_cost += narration_cost
+                        if narration_usage.input_tokens or narration_usage.output_tokens or narration_cost:
+                            yield UsageUpdated(
+                                narration_usage.input_tokens,
+                                narration_usage.output_tokens,
+                                narration_cost,
+                            )
+                    forced_narration_emitted = True
                 if current_text:
                     assistant_parts.append({"type": "text", "text": current_text})
                     current_text = ""

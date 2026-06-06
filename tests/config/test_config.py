@@ -59,6 +59,7 @@ def test_defaults_match_today():
     check("defaults: tools is None (all)", cfg.tools is None)
     check("defaults: tool_modules is []", cfg.tool_modules == [])
     check("defaults: skills is []", cfg.skills == [])
+    check("defaults: narrate_tool_steps is False", cfg.narrate_tool_steps is False)
     check("defaults: mcp_servers is {}", cfg.mcp_servers == {})
 
 
@@ -67,6 +68,7 @@ def test_valid_passes():
     check("valid config returns LeaConfig", isinstance(cfg, LeaConfig))
     check("valid config: name mapped", cfg.model_name == "test-model")
     check("valid config: model_kwargs mapped", cfg.model_kwargs == {"temperature": 0.0})
+    check("valid config: narrate default", cfg.narrate_tool_steps is False)
 
 
 def test_null_and_empty_allowed():
@@ -117,6 +119,12 @@ def test_typed_errors():
 
     bad_skills = valid_raw(); bad_skills["agent"]["skills"] = "skills/induction.md"
     expect_raises("skills not a list", InvalidConfigValueError, lambda: validate_config(bad_skills))
+
+    narrate = valid_raw(); narrate["agent"]["narrate_tool_steps"] = True
+    check("narrate_tool_steps bool allowed", validate_config(narrate).narrate_tool_steps is True)
+
+    bad_narrate = valid_raw(); bad_narrate["agent"]["narrate_tool_steps"] = "yes"
+    expect_raises("narrate_tool_steps not bool", InvalidConfigValueError, lambda: validate_config(bad_narrate))
 
     # mcp section
     mcp_both = valid_raw(); mcp_both["mcp"] = {"servers": {"x": {"command": "c", "url": "u"}}}
