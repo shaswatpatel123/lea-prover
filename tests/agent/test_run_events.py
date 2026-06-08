@@ -9,7 +9,9 @@ Exits 0 if every check passes, 1 otherwise.
 
 import io
 import sys
+import tempfile
 from contextlib import redirect_stdout
+from pathlib import Path
 
 import lea.agent as agent
 from lea.config import LeaConfig
@@ -21,6 +23,7 @@ from lea.events import (
 )
 
 _FAILURES: list[str] = []
+_ORIGINAL_PROPOSAL_FILE = agent._proposal_file
 
 
 def check(name: str, cond: bool) -> None:
@@ -56,6 +59,7 @@ def install_fakes():
         ))
     agent._save_session = lambda *a, **k: None
     agent.load_system_prompt = lambda variant, skills=None: "SYS"
+    agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
     return calls
 
 
@@ -85,6 +89,7 @@ def install_silent_tool_fake():
         ))
     agent._save_session = lambda *a, **k: None
     agent.load_system_prompt = lambda variant, skills=None: "SYS"
+    agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
     return calls
 
 
@@ -93,6 +98,7 @@ def cfg(max_turns=None, tools=None, skills=None, narrate_tool_steps=False):
                      prompt_variant="default", max_turns=max_turns,
                      tools=tools, tool_modules=[], skills=skills or [],
                      narrate_tool_steps=narrate_tool_steps, permission_tier="none",
+                     theorem_translation_max_retries=3,
                      mcp_servers={})
 
 
@@ -141,6 +147,33 @@ def install_approval_fake(*, guard_drift=False):
             schema={"name": "echo", "description": "echo args", "input_schema": {"type": "object"}},
             handler=lambda a: "echoed:" + str(a),
         ))
+    agent._save_session = lambda *a, **k: None
+    agent.load_system_prompt = lambda variant, skills=None: "SYS"
+    agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
+    return calls
+
+
+def install_preflight_fake(proposals, check_for_code):
+    calls = {"proposal_count": 0, "repair_messages": [], "tmpdir": tempfile.TemporaryDirectory()}
+
+    def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
+        if "theorem-translation review mode" in system:
+            calls["proposal_count"] += 1
+            if len(messages) > 1:
+                calls["repair_messages"].append(messages[-1]["content"])
+            index = min(calls["proposal_count"] - 1, len(proposals) - 1)
+            yield TextDelta(proposals[index])
+            yield Done(Usage(10, 5), 0.001)
+        else:
+            yield TextDelta("Done after approval.")
+            yield Done(Usage(5, 5), 0.0005)
+
+    def fake_lean_check(path):
+        return check_for_code(Path(path).read_text())
+
+    agent.stream = fake_stream
+    agent._tools.lean_check = fake_lean_check
+    agent._proposal_file = lambda session_id, candidate: Path(calls["tmpdir"].name) / f"{session_id}_{candidate}.lean"
     agent._save_session = lambda *a, **k: None
     agent.load_system_prompt = lambda variant, skills=None: "SYS"
     return calls
@@ -264,6 +297,83 @@ def test_theorem_translation_reject_feedback_loops():
     check("reject then accept finishes", isinstance(events[-1], Finished))
 
 
+def test_theorem_translation_repairs_missing_import_before_approval():
+    calls = install_preflight_fake(
+        [
+            "```lean\nimport Mathlib.Data.Nat.Basic\n\n"
+            "theorem sum_first_n_odd_numbers (n : Nat) :\n"
+            "    (Finset.range n).sum (fun k => 2 * k + 1) = n * n := by sorry\n```",
+            "```lean\nimport Mathlib\n\n"
+            "theorem sum_first_n_odd_numbers (n : Nat) :\n"
+            "    (Finset.range n).sum (fun k => 2 * k + 1) = n * n := by sorry\n```",
+        ],
+        lambda code: "error: Unknown identifier `Finset.range`" if "Mathlib.Data.Nat.Basic" in code else "warning: declaration uses 'sorry'",
+    )
+    gen = agent.run_events(cfg_approval(), "prove sum of odd numbers")
+    events, approval = collect_until(gen, ApprovalRequested)
+    check("missing import repaired before approval", calls["proposal_count"] == 2)
+    check("repair prompt included previous candidate", "Mathlib.Data.Nat.Basic" in calls["repair_messages"][0])
+    check("repair prompt included diagnostics", "Unknown identifier" in calls["repair_messages"][0])
+    check("approval emitted after repair", isinstance(approval, ApprovalRequested))
+    check("approval uses repaired import", "import Mathlib" in approval.lean_code)
+    check("approval before first proof turn after repair", not any(isinstance(e, TurnStarted) for e in events))
+
+
+def test_theorem_translation_repairs_lean3_lambda_before_approval():
+    calls = install_preflight_fake(
+        [
+            "```lean\nimport Mathlib\n\n"
+            "theorem sum_first_n_odd_numbers (n : Nat) :\n"
+            "    (Finset.range n).sum (lambda k, 2 * k + 1) = n * n := by sorry\n```",
+            "```lean\nimport Mathlib\n\n"
+            "theorem sum_first_n_odd_numbers (n : Nat) :\n"
+            "    (Finset.range n).sum (fun k => 2 * k + 1) = n * n := by sorry\n```",
+        ],
+        lambda code: "error: unexpected token ','; expected '->', '=>'" if "lambda k," in code else "warning: declaration uses 'sorry'",
+    )
+    gen = agent.run_events(cfg_approval(), "prove sum of odd numbers")
+    _, approval = collect_until(gen, ApprovalRequested)
+    check("lean3 lambda repaired before approval", calls["proposal_count"] == 2)
+    check("lambda repair prompt included candidate", "lambda k," in calls["repair_messages"][0])
+    check("lambda repair prompt requires Lean 4", "Use Lean 4 syntax only" in calls["repair_messages"][0])
+    check("approval uses Lean 4 lambda", "fun k =>" in approval.lean_code)
+
+
+def test_theorem_translation_failure_reports_all_attempts():
+    install_preflight_fake(
+        [
+            "```lean\nimport Mathlib\n\ntheorem bad_one : True := by sorry\n```",
+            "```lean\nimport Mathlib\n\ntheorem bad_two : True := by sorry\n```",
+            "```lean\nimport Mathlib\n\ntheorem bad_three : True := by sorry\n```",
+        ],
+        lambda code: f"error: failed check for {code.split('theorem ')[1].split(' ')[0]}",
+    )
+    events = list(agent.run_events(cfg_approval(), "prove a thing"))
+    fin = events[-1]
+    check("preflight all-fail reason", isinstance(fin, Finished) and fin.reason == "theorem_translation_failed")
+    check("preflight all-fail turns zero", fin.turns == 0)
+    usage_events = [e for e in events if isinstance(e, UsageUpdated)]
+    check("preflight all-fail emits usage", usage_events == [UsageUpdated(30, 15, 0.003)])
+    check("preflight all-fail finished usage counted", fin.usage == Usage(30, 15))
+    check("preflight all-fail finished cost counted", abs(fin.cost - 0.003) < 1e-9)
+    check("preflight all-fail includes attempt 1", "Attempt 1 candidate" in fin.text and "bad_one" in fin.text)
+    check("preflight all-fail includes attempt 2", "Attempt 2 candidate" in fin.text and "bad_two" in fin.text)
+    check("preflight all-fail includes attempt 3", "Attempt 3 candidate" in fin.text and "bad_three" in fin.text)
+
+
+def test_theorem_translation_retry_config_honored():
+    calls = install_preflight_fake(
+        ["```lean\nimport Mathlib\n\ntheorem bad_one : True := by sorry\n```"],
+        lambda code: "error: still invalid",
+    )
+    config = cfg_approval()
+    config.theorem_translation_max_retries = 1
+    events = list(agent.run_events(config, "prove a thing"))
+    fin = events[-1]
+    check("retry config used once", calls["proposal_count"] == 1)
+    check("retry config reflected in error", "after 1 attempts" in fin.text)
+
+
 def test_accepted_theorem_header_guard():
     install_approval_fake(guard_drift=True)
     gen = agent.run_events(cfg_approval(), "prove a thing")
@@ -283,6 +393,10 @@ def main():
     test_run_wrapper_return_shape()
     test_theorem_translation_accept_continues()
     test_theorem_translation_reject_feedback_loops()
+    test_theorem_translation_repairs_missing_import_before_approval()
+    test_theorem_translation_repairs_lean3_lambda_before_approval()
+    test_theorem_translation_failure_reports_all_attempts()
+    test_theorem_translation_retry_config_honored()
     test_accepted_theorem_header_guard()
     print()
     if _FAILURES:

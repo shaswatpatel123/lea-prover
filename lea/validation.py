@@ -28,6 +28,7 @@ _AGENT_KEYS = {
     "skills",
     "narrate_tool_steps",
     "permission_tier",
+    "theorem_translation_max_retries",
 }
 # Keys that must be present (others are optional and may be omitted/null).
 _AGENT_REQUIRED = {"prompt_variant", "max_turns"}
@@ -50,6 +51,7 @@ class LeaConfig:
     skills: list[str]        # skill markdown files to inject into the system prompt, in order
     narrate_tool_steps: bool # True → ask the model to summarize intent before tool calls
     permission_tier: str     # none | theorem_translation; stepwise is reserved for a later release
+    theorem_translation_max_retries: int # internal preflight attempts before theorem_translation fails
     mcp_servers: dict        # name → server spec (stdio: command/args/env/cwd, or remote: url/headers/transport)
 
 
@@ -116,6 +118,18 @@ def _check_opt_int(section: str, key: str, value: object) -> None:
     if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
         raise InvalidConfigValueError(
             f"'{section}.{key}' must be an integer or null, got {type(value).__name__}."
+        )
+
+
+def _check_positive_int(section: str, key: str, value: object) -> None:
+    # bool is a subclass of int — exclude it so `true` isn't read as 1.
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise InvalidConfigValueError(
+            f"'{section}.{key}' must be a positive integer, got {type(value).__name__}."
+        )
+    if value < 1:
+        raise InvalidConfigValueError(
+            f"'{section}.{key}' must be at least 1, got {value}."
         )
 
 
@@ -194,6 +208,8 @@ def validate_config(raw: dict) -> LeaConfig:
     _check_bool("agent", "narrate_tool_steps", narrate_tool_steps)
     permission_tier = agent.get("permission_tier", "none")
     _check_permission_tier(permission_tier)
+    theorem_translation_max_retries = agent.get("theorem_translation_max_retries", 3)
+    _check_positive_int("agent", "theorem_translation_max_retries", theorem_translation_max_retries)
 
     # Optional tool keys: omitted/null tools → all registered tools; omitted
     # tool_modules → no custom modules.
@@ -215,5 +231,6 @@ def validate_config(raw: dict) -> LeaConfig:
         skills=skills or [],
         narrate_tool_steps=narrate_tool_steps,
         permission_tier=permission_tier,
+        theorem_translation_max_retries=theorem_translation_max_retries,
         mcp_servers=mcp_servers,
     )

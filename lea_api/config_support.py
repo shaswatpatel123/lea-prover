@@ -39,5 +39,6 @@ def to_public(cfg: LeaConfig) -> dict:
         "skills": cfg.skills,
         "narrate_tool_steps": cfg.narrate_tool_steps,
         "permission_tier": cfg.permission_tier,
+        "theorem_translation_max_retries": cfg.theorem_translation_max_retries,
         "mcp_servers": cfg.mcp_servers,
     }

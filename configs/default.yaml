@@ -19,6 +19,7 @@ agent:
   narrate_tool_steps: false             # true -> prompt the model to summarize before tool calls
   permission_tier: none                 # none -> no prompts; theorem_translation -> approve checked theorem statement
                                         # stepwise is reserved for a later pause-after-each-step mode
+  theorem_translation_max_retries: 3     # internal preflight attempts before theorem_translation fails
 
 mcp:
   servers: {}                           # external MCP servers; their tools register as <server>__<tool>

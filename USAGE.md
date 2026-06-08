@@ -53,4 +53,8 @@ Config files can also set `agent.permission_tier`:
 - `none` (default): no approval prompts.
 - `theorem_translation`: approve the checked top-level Lean theorem before proof search.
 
+When using `theorem_translation`, `agent.theorem_translation_max_retries` controls
+how many internal checked-translation attempts Lea makes before failing the run.
+The default is `3`.
+
 `stepwise` is reserved for a future pause-after-each-step mode and is rejected until that mode is implemented.

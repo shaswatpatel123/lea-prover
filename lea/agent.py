@@ -75,6 +75,11 @@ Rules:
 - Do not introduce helper lemmas.
 - Do not weaken, simplify, or replace the user's mathematical claim.
 - If previous feedback is provided, incorporate it into the next declaration.
+- Use Lean 4 syntax only.
+- Use `fun x => ...` or Lean 4 lambda syntax with `=>`; never use Lean 3 lambda syntax with a comma.
+- Lean namespaces are case-sensitive. Use `Finset.range`, not `finset.range`.
+- Prefer `import Mathlib` unless there is a strong reason to use narrower imports.
+- The returned file must pass `lean_check` with no errors. `sorry` warnings are acceptable in this preflight step.
 """
 
 
@@ -128,6 +133,24 @@ def _lean_check_has_error(output: str) -> bool:
     return bool(re.search(r"(^|\n).*error[:\s]", output, re.IGNORECASE))
 
 
+def _format_translation_attempt(attempt: dict) -> str:
+    return (
+        f"Attempt {attempt['attempt']} candidate:\n"
+        f"{attempt['code']}\n\n"
+        f"Attempt {attempt['attempt']} diagnostics:\n"
+        f"{attempt['check']}"
+    )
+
+
+class TheoremTranslationError(RuntimeError):
+    """A failed theorem-translation preflight, including model usage spent."""
+
+    def __init__(self, message: str, usage: Usage, cost: float):
+        super().__init__(message)
+        self.usage = usage
+        self.cost = cost
+
+
 def _checked_theorem_translation(
     *,
     model: str,
@@ -139,7 +162,7 @@ def _checked_theorem_translation(
 ):
     """Generate and typecheck a theorem translation candidate.
 
-    Retries invalid Lean internally up to three times. Returns
+    Retries invalid Lean internally according to config. Returns
     (code, theorem_name, check_result, usage, cost).
     """
     messages = [{"role": "user", "content": task}]
@@ -153,19 +176,29 @@ def _checked_theorem_translation(
 
     usage = Usage()
     cost = 0.0
-    diagnostics: list[str] = []
-    last_code = ""
-    last_check = ""
+    failed_attempts: list[dict] = []
 
-    for attempt in range(1, 4):
+    for attempt in range(1, config.theorem_translation_max_retries + 1):
         attempt_messages = list(messages)
-        if diagnostics:
+        if failed_attempts:
+            previous = failed_attempts[-1]
             attempt_messages.append({
                 "role": "user",
                 "content": (
-                    "The previous Lean theorem declaration did not typecheck. "
-                    "Return a corrected declaration only.\n\n"
-                    + "\n\n".join(diagnostics[-2:])
+                    "The previous Lean theorem declaration did not typecheck.\n"
+                    "Return a corrected complete Lean file only.\n\n"
+                    "Requirements:\n"
+                    "- Preserve the user's mathematical claim.\n"
+                    "- Keep exactly one theorem or lemma.\n"
+                    "- Use Lean 4 syntax only.\n"
+                    "- Prefer `import Mathlib` if the error may be caused by missing imports.\n"
+                    "- The body must be `by sorry`.\n\n"
+                    "Previous candidate:\n"
+                    "```lean\n"
+                    f"{previous['code']}\n"
+                    "```\n\n"
+                    "Diagnostics:\n"
+                    f"{previous['check']}"
                 ),
             })
 
@@ -186,18 +219,20 @@ def _checked_theorem_translation(
                 cost += event.cost
 
         code = _as_sorry_skeleton(_extract_lean_code(text))
-        last_code = code
         path = _proposal_file(session_id, candidate)
         path.write_text(code + "\n")
         check = _tools.lean_check(str(path))
-        last_check = check
         if not _lean_check_has_error(check):
             return code, _extract_theorem_name(code), check, usage, cost
-        diagnostics.append(f"Attempt {attempt} diagnostics:\n{check}")
+        failed_attempts.append({"attempt": attempt, "code": code, "check": check})
 
-    raise RuntimeError(
-        "theorem translation failed to typecheck after 3 attempts.\n\n"
-        f"Last candidate:\n{last_code}\n\nLast diagnostics:\n{last_check}"
+    attempts = "\n\n".join(_format_translation_attempt(item) for item in failed_attempts)
+    raise TheoremTranslationError(
+        "theorem translation failed to typecheck after "
+        f"{config.theorem_translation_max_retries} attempts.\n\n"
+        f"{attempts}",
+        usage,
+        cost,
     )
 
 
@@ -486,6 +521,24 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
                     candidate=candidate,
                     session_id=session_id,
                 )
+            except TheoremTranslationError as e:
+                total_usage.input_tokens += e.usage.input_tokens
+                total_usage.output_tokens += e.usage.output_tokens
+                total_cost += e.cost
+                if e.usage.input_tokens or e.usage.output_tokens or e.cost:
+                    yield UsageUpdated(e.usage.input_tokens, e.usage.output_tokens, e.cost)
+                _save_session(session_id, model, messages, total_usage)
+                yield Finished(
+                    "theorem_translation_failed",
+                    f"Error: theorem translation failed: {type(e).__name__}: {e}",
+                    0,
+                    session_id,
+                    model,
+                    total_usage,
+                    total_cost,
+                    transcript(0),
+                )
+                return
             except Exception as e:
                 _save_session(session_id, model, messages, total_usage)
                 yield Finished(

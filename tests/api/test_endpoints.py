@@ -20,6 +20,7 @@ def test_config_validate_ok(client):
     assert body["config"]["model_name"]            # resolved from default.yaml
     assert body["config"]["narrate_tool_steps"] is False
     assert body["config"]["permission_tier"] == "none"
+    assert body["config"]["theorem_translation_max_retries"] == 3
     assert "mcp_servers" in body["config"]
 
 
@@ -27,6 +28,12 @@ def test_config_validate_accepts_narration_flag(client):
     r = client.post("/v1/config/validate", json={"config": {"agent": {"narrate_tool_steps": True}}})
     assert r.status_code == 200
     assert r.json()["config"]["narrate_tool_steps"] is True
+
+
+def test_config_validate_accepts_theorem_translation_retries(client):
+    r = client.post("/v1/config/validate", json={"config": {"agent": {"theorem_translation_max_retries": 5}}})
+    assert r.status_code == 200
+    assert r.json()["config"]["theorem_translation_max_retries"] == 5
 
 
 def test_config_validate_typed_error(client):

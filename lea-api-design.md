@@ -250,6 +250,9 @@ Lea persists sessions and can resume them.
     "tools": null,
     "tool_modules": [],
     "skills": [],
+    "narrate_tool_steps": false,
+    "permission_tier": "none",
+    "theorem_translation_max_retries": 3,
     "mcp_servers": {}
   }
 }
