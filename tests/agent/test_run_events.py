@@ -384,6 +384,121 @@ def test_accepted_theorem_header_guard():
     check("header drift rejected by guarded write_file", guarded and "accepted top-level theorem" in guarded[0].content)
 
 
+def cfg_interactive():
+    c = cfg()
+    c.prompt_variant = "interactive"
+    c.permission_tier = "theorem_translation"
+    return c
+
+
+def install_interactive_fake(decision):
+    """Fake stream for an interactive, resumed session.
+
+    Routes three kinds of model call by their system prompt: the intent
+    classifier, the theorem-translation preflight, and the main loop turn.
+    """
+    calls = {"loop_tool_names": None, "search_called": False, "preflight_called": False}
+
+    def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
+        if "FORMALIZE or ASSISTANT" in system:  # intent classifier
+            yield TextDelta(decision)
+            yield Done(Usage(3, 1), 0.0001)
+            return
+        if "theorem-translation review mode" in system:  # preflight (FORMALIZE only)
+            calls["preflight_called"] = True
+            yield TextDelta("```lean\nimport Mathlib\n\ntheorem t : True := by sorry\n```")
+            yield Done(Usage(10, 5), 0.001)
+            return
+        # main agentic loop turn
+        calls["loop_tool_names"] = [t.get("name") for t in (tools or [])]
+        if decision == "ASSISTANT" and not calls["search_called"]:
+            calls["search_called"] = True
+            yield TextDelta("Let me look that up. ")
+            yield ToolCall("search_mathlib", {"query": "even"})
+            yield _ToolMeta("call_s")
+            yield Done(Usage(8, 4), 0.0002)
+            return
+        yield TextDelta("Here is the explanation, in plain terms.")
+        yield Done(Usage(6, 3), 0.0002)
+
+    resumed_session = {
+        "id": "sess-1",
+        "model": "gemini/test",
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+        "messages": [
+            {"role": "user", "content": "prove that the sum of two evens is even"},
+            {"role": "assistant", "content": [{"type": "text", "text": "Proved it."}]},
+        ],
+    }
+    agent.stream = fake_stream
+    agent._tools.search_mathlib = lambda *a, **k: "Found: Nat.even_add in Mathlib/Algebra/Parity.lean"
+    agent._load_session = lambda session_id=None: dict(resumed_session)
+    agent._save_session = lambda *a, **k: None
+    agent.load_system_prompt = lambda variant, skills=None: f"SYS[{variant}]"
+    agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
+    return calls
+
+
+def test_interactive_assistant_turn_skips_preflight_and_keeps_tools():
+    calls = install_interactive_fake("ASSISTANT")
+    events = list(agent.run_events(cfg_interactive(), "explain this proof so a newbie gets it", resume="sess-1"))
+
+    check("assistant turn: no approval/preflight", not any(isinstance(e, ApprovalRequested) for e in events))
+    check("assistant turn: preflight never called", calls["preflight_called"] is False)
+    fin = events[-1]
+    check("assistant turn: benign 'assistant' reason", isinstance(fin, Finished) and fin.reason == "assistant")
+    check("assistant turn: answered in prose", "plain terms" in fin.text)
+    # The user-requested case: a lemma-lookup question can use search_mathlib.
+    check("assistant turn: full toolset available", "search_mathlib" in (calls["loop_tool_names"] or []))
+    check("assistant turn: search_mathlib actually called",
+          any(isinstance(e, ToolCalled) and e.name == "search_mathlib" for e in events))
+
+
+def test_interactive_formalize_turn_still_preflights():
+    calls = install_interactive_fake("FORMALIZE")
+    gen = agent.run_events(cfg_interactive(), "now prove that 2 + 2 = 4", resume="sess-1")
+    events, approval = collect_until(gen, ApprovalRequested)
+
+    check("formalize turn: preflight ran", calls["preflight_called"] is True)
+    check("formalize turn: approval requested", isinstance(approval, ApprovalRequested))
+    check("formalize turn: approval before any proof turn", not any(isinstance(e, TurnStarted) for e in events))
+
+
+def test_text_only_history_serializes_for_provider():
+    """Regression: assistant turns must round-trip through _to_openai_messages.
+
+    A bare-string assistant content made _to_openai_messages iterate the string
+    char-by-char and call .get on a char ('str' object has no attribute 'get').
+    """
+    from lea.providers import _to_openai_messages
+
+    resumed_messages = [
+        {"role": "user", "content": "prove that 2 + 2 = 4"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "I'll write the proof."},
+            {"type": "tool_call", "name": "write_file", "args": {"path": "p.lean"}, "id": "c1"},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_name": "write_file", "content": "ok", "tool_call_id": "c1"},
+        ]},
+        {"role": "assistant", "content": [{"type": "text", "text": "It compiles."}]},
+        {"role": "user", "content": "explain it for a newbie"},
+    ]
+    history = agent._text_only_history(resumed_messages)
+    try:
+        oai = _to_openai_messages("SYS", history)
+        ok = True
+    except Exception as exc:  # noqa: BLE001 - the regression we are guarding against
+        ok = False
+        print(f"    _to_openai_messages raised: {type(exc).__name__}: {exc}")
+    check("text-only history serializes without error", ok)
+    check("latest user message preserved", history[-1] == {"role": "user", "content": "explain it for a newbie"})
+    check(
+        "assistant turns use parts format",
+        all(m["role"] != "assistant" or isinstance(m["content"], list) for m in history),
+    )
+
+
 def main():
     print("agent (run_events + run) tests:")
     test_run_events_sequence()
@@ -398,6 +513,9 @@ def main():
     test_theorem_translation_failure_reports_all_attempts()
     test_theorem_translation_retry_config_honored()
     test_accepted_theorem_header_guard()
+    test_interactive_assistant_turn_skips_preflight_and_keeps_tools()
+    test_interactive_formalize_turn_still_preflights()
+    test_text_only_history_serializes_for_provider()
     print()
     if _FAILURES:
         print(f"FAILED ({len(_FAILURES)}): {', '.join(_FAILURES)}")
