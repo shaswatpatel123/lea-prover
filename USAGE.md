@@ -19,6 +19,11 @@ uv run lea --resume 20260418-031200   # resume a specific session
 
 # Safety valve
 uv run lea --max-turns 20 "..."       # limit turns (default: unlimited)
+
+# Approval gates
+uv run lea --permission-tier theorem_translation "..."
+# Ask before proof search starts: Lea proposes a checked top-level Lean theorem,
+# then continues only after you accept it.
 ```
 
 ## Supported providers
@@ -42,3 +47,14 @@ uv run lea --resume "Try a different approach using induction on the structure"
 ## Customization
 
 Drop a `lea.md` file in your working directory or the `workspace/` root. Its contents are appended to the system prompt. Use it for project-specific tactics, import conventions, or proof strategies.
+
+Config files can also set `agent.permission_tier`:
+
+- `none` (default): no approval prompts.
+- `theorem_translation`: approve the checked top-level Lean theorem before proof search.
+
+When using `theorem_translation`, `agent.theorem_translation_max_retries` controls
+how many internal checked-translation attempts Lea makes before failing the run.
+The default is `3`.
+
+`stepwise` is reserved for a future pause-after-each-step mode and is rejected until that mode is implemented.

@@ -132,12 +132,13 @@ def stream(model: str, system: str, messages: list, tools: list,
         yield the same event types, so the agent loop is identical either way.
     """
     model_kwargs = model_kwargs or {}
+    # Merge so an explicit model_kwargs api_key wins over the env-derived one,
+    # instead of colliding (both supplying api_key raises "got multiple values").
     call = dict(
         model=model,
         messages=_to_openai_messages(system, messages),
         tools=_to_openai_tools(tools) or None,
-        **_api_key_kwargs(model),
-        **model_kwargs,
+        **{**_api_key_kwargs(model), **model_kwargs},
     )
     if streaming:
         yield from _stream_streaming(model, call)

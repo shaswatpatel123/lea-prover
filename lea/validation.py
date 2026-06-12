@@ -20,7 +20,16 @@ from .errors import (
 # Recognized keys per section. Anything outside these is an UnknownConfigKeyError.
 _TOP_KEYS = {"model", "agent", "mcp"}
 _MODEL_KEYS = {"name", "model_kwargs", "stream"}
-_AGENT_KEYS = {"prompt_variant", "max_turns", "tools", "tool_modules", "skills"}
+_AGENT_KEYS = {
+    "prompt_variant",
+    "max_turns",
+    "tools",
+    "tool_modules",
+    "skills",
+    "narrate_tool_steps",
+    "permission_tier",
+    "theorem_translation_max_retries",
+}
 # Keys that must be present (others are optional and may be omitted/null).
 _AGENT_REQUIRED = {"prompt_variant", "max_turns"}
 _MCP_KEYS = {"servers"}
@@ -40,6 +49,9 @@ class LeaConfig:
     tools: list[str] | None  # tool allowlist (order = call order); None → all registered tools
     tool_modules: list[str]  # python modules to import so custom tools register
     skills: list[str]        # skill markdown files to inject into the system prompt, in order
+    narrate_tool_steps: bool # True → ask the model to summarize intent before tool calls
+    permission_tier: str     # none | theorem_translation; stepwise is reserved for a later release
+    theorem_translation_max_retries: int # internal preflight attempts before theorem_translation fails
     mcp_servers: dict        # name → server spec (stdio: command/args/env/cwd, or remote: url/headers/transport)
 
 
@@ -85,11 +97,39 @@ def _check_bool(section: str, key: str, value: object) -> None:
         )
 
 
+def _check_permission_tier(value: object) -> None:
+    if not isinstance(value, str):
+        raise InvalidConfigValueError(
+            f"'agent.permission_tier' must be a string, got {type(value).__name__}."
+        )
+    if value == "stepwise":
+        raise InvalidConfigValueError(
+            "'agent.permission_tier=stepwise' is reserved for the future tier-three approval mode "
+            "and is not implemented yet."
+        )
+    if value not in {"none", "theorem_translation"}:
+        raise InvalidConfigValueError(
+            "'agent.permission_tier' must be one of: none, theorem_translation."
+        )
+
+
 def _check_opt_int(section: str, key: str, value: object) -> None:
     # bool is a subclass of int — exclude it so `true` isn't read as 1.
     if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
         raise InvalidConfigValueError(
             f"'{section}.{key}' must be an integer or null, got {type(value).__name__}."
+        )
+
+
+def _check_positive_int(section: str, key: str, value: object) -> None:
+    # bool is a subclass of int — exclude it so `true` isn't read as 1.
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise InvalidConfigValueError(
+            f"'{section}.{key}' must be a positive integer, got {type(value).__name__}."
+        )
+    if value < 1:
+        raise InvalidConfigValueError(
+            f"'{section}.{key}' must be at least 1, got {value}."
         )
 
 
@@ -164,6 +204,12 @@ def validate_config(raw: dict) -> LeaConfig:
     _check_bool("model", "stream", model["stream"])
     _check_str("agent", "prompt_variant", agent["prompt_variant"])
     _check_opt_int("agent", "max_turns", agent["max_turns"])
+    narrate_tool_steps = agent.get("narrate_tool_steps", False)
+    _check_bool("agent", "narrate_tool_steps", narrate_tool_steps)
+    permission_tier = agent.get("permission_tier", "none")
+    _check_permission_tier(permission_tier)
+    theorem_translation_max_retries = agent.get("theorem_translation_max_retries", 3)
+    _check_positive_int("agent", "theorem_translation_max_retries", theorem_translation_max_retries)
 
     # Optional tool keys: omitted/null tools → all registered tools; omitted
     # tool_modules → no custom modules.
@@ -183,5 +229,8 @@ def validate_config(raw: dict) -> LeaConfig:
         tools=tools,
         tool_modules=tool_modules or [],
         skills=skills or [],
+        narrate_tool_steps=narrate_tool_steps,
+        permission_tier=permission_tier,
+        theorem_translation_max_retries=theorem_translation_max_retries,
         mcp_servers=mcp_servers,
     )

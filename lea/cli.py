@@ -29,6 +29,12 @@ def main():
         "--max-turns", type=int, default=None, help="Max agent turns (overrides config).",
     )
     parser.add_argument(
+        "--permission-tier",
+        choices=["none", "theorem_translation"],
+        default=None,
+        help="Approval mode for the run (overrides config).",
+    )
+    parser.add_argument(
         "--sketch", action="store_true", help="Use the sketch prompt (produce a proof skeleton with sorry's).",
     )
     parser.add_argument(
@@ -65,6 +71,8 @@ def main():
         config.model_name = args.model
     if args.max_turns is not None:
         config.max_turns = args.max_turns
+    if args.permission_tier is not None:
+        config.permission_tier = args.permission_tier
     if args.sketch:
         config.prompt_variant = "sketch"
     elif args.fill:

@@ -45,6 +45,25 @@ class ToolResulted:
 
 
 @dataclass(frozen=True)
+class ApprovalRequested:
+    """The agent is paused until a user accepts or rejects a proposed action."""
+    approval_id: str
+    tier: str
+    candidate: int
+    lean_code: str
+    theorem_name: str | None
+    check_result: str
+
+
+@dataclass(frozen=True)
+class ApprovalResolved:
+    """A previously requested approval was answered by the user."""
+    approval_id: str
+    decision: str
+    feedback: str | None = None
+
+
+@dataclass(frozen=True)
 class UsageUpdated:
     """Token usage + cost for a single turn's model response (a per-turn delta)."""
     input_tokens: int
@@ -72,6 +91,8 @@ AgentEvent = (
     | AssistantTextDelta
     | ToolCalled
     | ToolResulted
+    | ApprovalRequested
+    | ApprovalResolved
     | UsageUpdated
     | Finished
 )

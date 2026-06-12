@@ -59,6 +59,9 @@ def test_defaults_match_today():
     check("defaults: tools is None (all)", cfg.tools is None)
     check("defaults: tool_modules is []", cfg.tool_modules == [])
     check("defaults: skills is []", cfg.skills == [])
+    check("defaults: narrate_tool_steps is False", cfg.narrate_tool_steps is False)
+    check("defaults: permission_tier is none", cfg.permission_tier == "none")
+    check("defaults: theorem_translation_max_retries is 3", cfg.theorem_translation_max_retries == 3)
     check("defaults: mcp_servers is {}", cfg.mcp_servers == {})
 
 
@@ -67,6 +70,9 @@ def test_valid_passes():
     check("valid config returns LeaConfig", isinstance(cfg, LeaConfig))
     check("valid config: name mapped", cfg.model_name == "test-model")
     check("valid config: model_kwargs mapped", cfg.model_kwargs == {"temperature": 0.0})
+    check("valid config: narrate default", cfg.narrate_tool_steps is False)
+    check("valid config: permission tier default", cfg.permission_tier == "none")
+    check("valid config: theorem translation retry default", cfg.theorem_translation_max_retries == 3)
 
 
 def test_null_and_empty_allowed():
@@ -117,6 +123,39 @@ def test_typed_errors():
 
     bad_skills = valid_raw(); bad_skills["agent"]["skills"] = "skills/induction.md"
     expect_raises("skills not a list", InvalidConfigValueError, lambda: validate_config(bad_skills))
+
+    narrate = valid_raw(); narrate["agent"]["narrate_tool_steps"] = True
+    check("narrate_tool_steps bool allowed", validate_config(narrate).narrate_tool_steps is True)
+
+    bad_narrate = valid_raw(); bad_narrate["agent"]["narrate_tool_steps"] = "yes"
+    expect_raises("narrate_tool_steps not bool", InvalidConfigValueError, lambda: validate_config(bad_narrate))
+
+    approval = valid_raw(); approval["agent"]["permission_tier"] = "theorem_translation"
+    check("permission_tier theorem_translation allowed", validate_config(approval).permission_tier == "theorem_translation")
+
+    bad_permission = valid_raw(); bad_permission["agent"]["permission_tier"] = "always"
+    expect_raises("permission_tier invalid", InvalidConfigValueError, lambda: validate_config(bad_permission))
+
+    stepwise = valid_raw(); stepwise["agent"]["permission_tier"] = "stepwise"
+    expect_raises("permission_tier stepwise reserved", InvalidConfigValueError, lambda: validate_config(stepwise))
+
+    retries = valid_raw(); retries["agent"]["theorem_translation_max_retries"] = 5
+    check("theorem_translation_max_retries allowed", validate_config(retries).theorem_translation_max_retries == 5)
+
+    zero_retries = valid_raw(); zero_retries["agent"]["theorem_translation_max_retries"] = 0
+    expect_raises("theorem_translation_max_retries zero", InvalidConfigValueError, lambda: validate_config(zero_retries))
+
+    negative_retries = valid_raw(); negative_retries["agent"]["theorem_translation_max_retries"] = -1
+    expect_raises("theorem_translation_max_retries negative", InvalidConfigValueError, lambda: validate_config(negative_retries))
+
+    null_retries = valid_raw(); null_retries["agent"]["theorem_translation_max_retries"] = None
+    expect_raises("theorem_translation_max_retries null", InvalidConfigValueError, lambda: validate_config(null_retries))
+
+    bool_retries = valid_raw(); bool_retries["agent"]["theorem_translation_max_retries"] = True
+    expect_raises("theorem_translation_max_retries bool", InvalidConfigValueError, lambda: validate_config(bool_retries))
+
+    str_retries = valid_raw(); str_retries["agent"]["theorem_translation_max_retries"] = "3"
+    expect_raises("theorem_translation_max_retries str", InvalidConfigValueError, lambda: validate_config(str_retries))
 
     # mcp section
     mcp_both = valid_raw(); mcp_both["mcp"] = {"servers": {"x": {"command": "c", "url": "u"}}}
