@@ -83,6 +83,80 @@ Rules:
 """
 
 
+_INTENT_CLASSIFIER_PROMPT = """\
+You route the user's latest message in an interactive Lean 4 session that already \
+contains prior work (often a completed proof).
+
+Reply with exactly one word:
+- FORMALIZE — the user is giving you a NEW mathematical statement to formalize and \
+prove, or is otherwise asking you to prove/formalize something.
+- ASSISTANT — the user is asking a question, requesting an explanation, asking you to \
+look up a lemma in Mathlib, clarifying a tactic, or otherwise continuing the \
+conversation about existing work.
+
+Output only the single word FORMALIZE or ASSISTANT, with no other text."""
+
+
+def _text_only_history(messages: list, limit: int = 8) -> list[dict]:
+    """Flatten messages to a cheap text-only {role, content} list for classification.
+
+    Drops tool calls/results and assistant tool-call parts so the classifier sees a
+    clean conversation; keeps only the trailing `limit` text turns.
+    """
+    out: list[dict] = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = " ".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        else:
+            text = ""
+        text = text.strip()
+        if not text:
+            continue
+        if role == "assistant":
+            # Assistant turns must use the parts format: _to_openai_messages treats a
+            # bare string as a user-only shape and iterates assistant content as a list.
+            out.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+        else:
+            out.append({"role": "user", "content": text})
+    return out[-limit:]
+
+
+def _classify_intent(model: str, messages: list, config: LeaConfig) -> tuple[str, Usage, float]:
+    """Ask the model whether the latest turn is FORMALIZE or ASSISTANT.
+
+    Returns (decision, usage, cost). Defaults to FORMALIZE on any ambiguity so a
+    genuine theorem to prove is never silently dropped into chat mode.
+    """
+    history = _text_only_history(messages)
+    text = ""
+    usage = Usage()
+    cost = 0.0
+    for event in stream(
+        model,
+        _INTENT_CLASSIFIER_PROMPT,
+        history,
+        [],
+        config.model_kwargs,
+        streaming=config.stream,
+    ):
+        if isinstance(event, TextDelta):
+            text += event.text
+        elif isinstance(event, Done):
+            usage.input_tokens += event.usage.input_tokens
+            usage.output_tokens += event.usage.output_tokens
+            cost += event.cost
+    decision = "ASSISTANT" if "ASSISTANT" in text.strip().upper() else "FORMALIZE"
+    return decision, usage, cost
+
+
 def _extract_lean_code(text: str) -> str:
     """Pull a Lean code block from model output, or use the raw text as a fallback."""
     match = re.search(r"```(?:lean|Lean)?\s*(.*?)```", text, re.DOTALL)
@@ -470,19 +544,25 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
     import_tool_modules(config.tool_modules)
     tools_schema, tool_handlers = build_toolset(config.tools)
 
+    resumed = False
     if resume:
-        session = _load_session(resume if isinstance(resume, str) else None)
-        messages = session["messages"]
-        model = session.get("model", model)
-        session_id = session["id"]
-        total_usage = Usage(
-            session.get("usage", {}).get("input_tokens", 0),
-            session.get("usage", {}).get("output_tokens", 0),
-        )
-        if task:
-            messages.append({"role": "user", "content": task})
-        yield SessionResumed(session_id, len(messages))
-    else:
+        try:
+            session = _load_session(resume if isinstance(resume, str) else None)
+        except FileNotFoundError:
+            session = None  # stale/missing session id — degrade to a fresh start
+        if session is not None:
+            messages = session["messages"]
+            model = session.get("model", model)
+            session_id = session["id"]
+            total_usage = Usage(
+                session.get("usage", {}).get("input_tokens", 0),
+                session.get("usage", {}).get("output_tokens", 0),
+            )
+            if task:
+                messages.append({"role": "user", "content": task})
+            resumed = True
+            yield SessionResumed(session_id, len(messages))
+    if not resumed:
         session_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         messages = [{"role": "user", "content": task}]
         total_usage = Usage()
@@ -507,7 +587,21 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
             "messages": clean,
         }
 
-    if config.permission_tier == "theorem_translation":
+    # Interactive chat: classify whether this resumed turn is a new formalization or
+    # an assistant/QA request (explain, look up a lemma, etc.), and route. Only fires
+    # on a resumed session that already has prior turns — a session's first message is
+    # always a formalization, so the cold-start path is untouched.
+    assistant_mode = False
+    if config.prompt_variant == "interactive" and resumed and len(messages) > 1:
+        decision, intent_usage, intent_cost = _classify_intent(model, messages, config)
+        total_usage.input_tokens += intent_usage.input_tokens
+        total_usage.output_tokens += intent_usage.output_tokens
+        total_cost += intent_cost
+        if intent_usage.input_tokens or intent_usage.output_tokens or intent_cost:
+            yield UsageUpdated(intent_usage.input_tokens, intent_usage.output_tokens, intent_cost)
+        assistant_mode = decision == "ASSISTANT"
+
+    if config.permission_tier == "theorem_translation" and not assistant_mode:
         feedback: list[str] = []
         candidate = 0
         while True:
@@ -679,7 +773,8 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
         if not tool_calls:
             _save_session(session_id, model, messages, total_usage)
             text = "".join(p["text"] for p in assistant_parts if p["type"] == "text")
-            yield Finished("completed", text or "(no response)", turn, session_id, model,
+            reason = "assistant" if assistant_mode else "completed"
+            yield Finished(reason, text or "(no response)", turn, session_id, model,
                            total_usage, total_cost, transcript(turn))
             return
 

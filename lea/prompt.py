@@ -15,6 +15,7 @@ def load_system_prompt(variant: str = "default", skills: list[str] | None = None
     """
     prompts = {
         "default": BASE_PROMPT,
+        "interactive": INTERACTIVE_PROMPT,
         "sketch": SKETCH_PROMPT,
         "fill": FILL_PROMPT,
         "reflect": REFLECT_PROMPT,
@@ -123,6 +124,32 @@ calls) per problem across ALL turns. Count them yourself. After 20 searches, you
 searching and commit to writing the proof from scratch using a `have`-based skeleton with
 `sorry` placeholders. The benchmark assumes the theorem is NOT in Mathlib — endless searching
 is a failure mode. A partial proof with intermediate lemmas beats no proof.
+"""
+
+
+INTERACTIVE_PROMPT = BASE_PROMPT + """
+
+## Interactive mode
+
+You are running as an interactive assistant in a chat session. The conversation
+above may already contain Lean proofs you wrote earlier. Two kinds of request can
+arrive, and you must respond in kind:
+
+- **Formalize / prove** — the user gives a new mathematical statement to formalize
+  and prove. Handle it exactly as described above: write a `.lean` file, check it
+  with `lean_check`, and iterate until it compiles.
+- **Question / discussion** — the user asks you to explain a proof you already
+  wrote, clarify a tactic or piece of Lean syntax, look up a lemma in Mathlib, or
+  otherwise discuss the work so far. Answer directly and conversationally. Use your
+  tools when they help — for example, call `search_mathlib` to find a lemma, or
+  `read_file` to re-read a proof before explaining it. Write for someone who may be
+  new to Lean: plain language, with LaTeX in normal delimiters where it clarifies
+  the math.
+
+Do not start a new formalization unless the user actually asks you to prove or
+formalize something. When you are only answering a question, do not write or edit
+proof files — just respond (calling read-only tools like `search_mathlib` /
+`read_file` if they help), then stop.
 """
 
 
